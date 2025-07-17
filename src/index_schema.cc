@@ -43,6 +43,7 @@
 #include "src/rdb_serialization.h"
 #include "src/utils/string_interning.h"
 #include "src/vector_externalizer.h"
+#include "src/metrics.h"
 #include "vmsdk/src/blocked_client.h"
 #include "vmsdk/src/log.h"
 #include "vmsdk/src/managed_pointers.h"
@@ -275,6 +276,8 @@ void TrackResults(
     IndexSchema::Stats::ResultCnt<std::atomic<uint64_t>> &counter) {
   if (ABSL_PREDICT_FALSE(!status.ok())) {
     ++counter.failure_cnt;
+    // Track global ingestion failures
+    Metrics::GetStats().ingest_total_failures++;
   } else if (status.value()) {
     ++counter.success_cnt;
   } else {
@@ -362,6 +365,12 @@ void IndexSchema::ProcessKeyspaceNotification(ValkeyModuleCtx *ctx,
     }
   }
   if (added) {
+    // Track key modifications by data type
+    if (attribute_data_type_->ToProto() == data_model::ATTRIBUTE_DATA_TYPE_HASH) {
+      Metrics::GetStats().ingest_hash_keys++;
+    } else if (attribute_data_type_->ToProto() == data_model::ATTRIBUTE_DATA_TYPE_JSON) {
+      Metrics::GetStats().ingest_json_keys++;
+    }
     ProcessMutation(ctx, mutated_attributes, interned_key, from_backfill);
   }
 }
@@ -411,6 +420,24 @@ void IndexSchema::ProcessAttributeMutation(
       if (!was_tracked) {
         ++stats_.document_cnt;
       }
+
+      // Track field type counters
+      switch (index->GetIndexerType()) {
+        case indexes::IndexerType::kVector:
+        case indexes::IndexerType::kHNSW:
+        case indexes::IndexerType::kFlat:
+          Metrics::GetStats().ingest_field_vector++;
+          break;
+        case indexes::IndexerType::kNumeric:
+          Metrics::GetStats().ingest_field_numeric++;
+          break;
+        case indexes::IndexerType::kTag:
+          Metrics::GetStats().ingest_field_tag++;
+          break;
+        default:
+          // Shouldn't happen
+          break;
+      }
     }
     return;
   }
@@ -444,6 +471,11 @@ void IndexSchema::ProcessMultiQueue() {
   if (ABSL_PREDICT_TRUE(multi_mutations.keys.empty())) {
     return;
   }
+  
+  // Track batch metrics
+  Metrics::GetStats().ingest_last_batch_size = multi_mutations.keys.size();
+  Metrics::GetStats().ingest_total_batches++;
+  
   multi_mutations.blocking_counter =
       std::make_unique<absl::BlockingCounter>(multi_mutations.keys.size());
   vmsdk::WriterMutexLock lock(&time_sliced_mutex_);
@@ -565,7 +597,6 @@ void IndexSchema::BackfillScanCallback(ValkeyModuleCtx *ctx,
                                        ValkeyModuleKey *key, void *privdata) {
   IndexSchema *index_schema = reinterpret_cast<IndexSchema *>(privdata);
   index_schema->backfill_job_.Get()->scanned_key_count++;
-  index_schema->backfill_scanned_count_.store(index_schema->backfill_job_.Get()->scanned_key_count, std::memory_order_relaxed);
   auto key_prefixes = index_schema->GetKeyPrefixes();
   auto key_cstr = vmsdk::ToStringView(keyname);
   if (std::any_of(key_prefixes.begin(), key_prefixes.end(),
@@ -584,14 +615,12 @@ uint32_t IndexSchema::PerformBackfill(ValkeyModuleCtx *ctx,
   }
 
   backfill_job->paused_by_oom = false;
-  backfill_paused_by_oom_.store(false, std::memory_order_relaxed);
 
   // We need to ensure the DB size is monotonically increasing, since it could
   // change during the backfill, in which case we may show incorrect progress.
   backfill_job->db_size =
       std::max(backfill_job->db_size,
                (uint64_t)ValkeyModule_DbSize(backfill_job->scan_ctx.get()));
-  backfill_db_size_.store(backfill_job->db_size, std::memory_order_relaxed);
 
   uint64_t start_scan_count = backfill_job->scanned_key_count;
   uint64_t &current_scan_count = backfill_job->scanned_key_count;
@@ -599,7 +628,6 @@ uint32_t IndexSchema::PerformBackfill(ValkeyModuleCtx *ctx,
     auto ctx_flags = ValkeyModule_GetContextFlags(ctx);
     if (ctx_flags & VALKEYMODULE_CTX_FLAGS_OOM) {
       backfill_job->paused_by_oom = true;
-      backfill_paused_by_oom_.store(true, std::memory_order_relaxed);
       return 0;
     }
 
@@ -617,8 +645,6 @@ uint32_t IndexSchema::PerformBackfill(ValkeyModuleCtx *ctx,
           << absl::FormatDuration(backfill_job->stopwatch.Duration());
       uint32_t res = current_scan_count - start_scan_count;
       backfill_job->MarkScanAsDone();
-      backfill_scanned_count_.store(backfill_job->scanned_key_count, std::memory_order_relaxed);
-      backfill_scan_done_.store(true, std::memory_order_relaxed);
       return res;
     }
   }
@@ -932,6 +958,17 @@ void IndexSchema::OnLoadingEnded(ValkeyModuleCtx *ctx) {
                          << absl::FormatDuration(stop_watch.Duration());
 }
 
+vmsdk::BlockedClientCategory IndexSchema::GetBlockedCategoryFromProto() const {
+  // Determine category based on data type
+  switch (attribute_data_type_->ToProto()) {
+    case data_model::ATTRIBUTE_DATA_TYPE_HASH:
+      return vmsdk::BlockedClientCategory::kHash;
+    case data_model::ATTRIBUTE_DATA_TYPE_JSON:
+      return vmsdk::BlockedClientCategory::kJson;
+    default:
+      return vmsdk::BlockedClientCategory::kOther;
+  }
+}
 // Returns true if the inserted key not exists otherwise false
 bool IndexSchema::TrackMutatedRecord(ValkeyModuleCtx *ctx,
                                      const InternedStringPtr &key,
@@ -945,7 +982,7 @@ bool IndexSchema::TrackMutatedRecord(ValkeyModuleCtx *ctx,
     itr->second.attributes.value() = std::move(mutated_attributes);
     itr->second.from_backfill = from_backfill;
     if (ABSL_PREDICT_TRUE(block_client)) {
-      vmsdk::BlockedClient blocked_client(ctx, true);
+      vmsdk::BlockedClient blocked_client(ctx, true, GetBlockedCategoryFromProto());
       blocked_client.MeasureTimeStart();
       itr->second.blocked_clients.emplace_back(std::move(blocked_client));
     }
@@ -959,7 +996,7 @@ bool IndexSchema::TrackMutatedRecord(ValkeyModuleCtx *ctx,
         std::move(mutated_attribute.second);
   }
   if (ABSL_PREDICT_TRUE(block_client)) {
-    vmsdk::BlockedClient blocked_client(ctx, true);
+    vmsdk::BlockedClient blocked_client(ctx, true, GetBlockedCategoryFromProto());
     blocked_client.MeasureTimeStart();
     itr->second.blocked_clients.emplace_back(std::move(blocked_client));
   }
@@ -1038,32 +1075,6 @@ void IndexSchema::VectorExternalizer(const InternedStringPtr &key,
   }
   VectorExternalizer::Instance().Remove(key, attribute_identifier,
                                         attribute_data_type_->ToProto());
-}
-
-bool IndexSchema::IsBackfillInProgressNoMain() const {
-  return !backfill_scan_done_.load(std::memory_order_acquire)
-         || stats_.backfill_inqueue_tasks.load(std::memory_order_relaxed) > 0;
-}
-
-float IndexSchema::GetBackfillPercentNoMain() const {
-  auto db = backfill_db_size_.load(std::memory_order_relaxed);
-  if (db == 0) {
-    return 1.0f;
-  }
-  auto scanned = backfill_scanned_count_.load(std::memory_order_relaxed);
-  auto queued  = stats_.backfill_inqueue_tasks.load(std::memory_order_relaxed);
-  auto done    = scanned > queued ? scanned - queued : 0;
-  return std::min(1.0f, float(done) / float(db));
-}
-
-std::string IndexSchema::GetStateForInfoNoMain() const {
-  if (backfill_scan_done_.load(std::memory_order_acquire)) {
-    return "ready";
-  }
-  if (backfill_paused_by_oom_.load(std::memory_order_relaxed)) {
-    return "backfill_paused_by_oom";
-  }
-  return "backfill_in_progress";
 }
 
 }  // namespace valkey_search

@@ -22,6 +22,73 @@
 
 namespace valkey_search {
 
+namespace info_async {
+
+struct InfoAsyncResult {
+  absl::StatusOr<query::info_fanout::InfoResult> info;
+  std::unique_ptr<query::info_fanout::InfoParameters> parameters;
+  InfoAsyncResult(absl::StatusOr<query::info_fanout::InfoResult> i,
+                  std::unique_ptr<query::info_fanout::InfoParameters> p)
+      : info(std::move(i)), parameters(std::move(p)) {}
+};
+
+int Reply(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+  auto *res = static_cast<InfoAsyncResult *>(
+      ValkeyModule_GetBlockedClientPrivateData(ctx));
+  if (!res->info.ok()) {
+    return ValkeyModule_ReplyWithError(ctx,
+                                       res->info.status().message().data());
+  }
+  const auto &info = res->info.value();
+
+  // Emit the same fields as LOCAL FT.INFO, postponing array length:
+  ValkeyModule_ReplyWithArray(ctx, VALKEYMODULE_POSTPONED_LEN);
+  ValkeyModule_ReplyWithSimpleString(ctx, "index_name");
+  ValkeyModule_ReplyWithSimpleString(ctx, info.index_name.c_str());
+  ValkeyModule_ReplyWithSimpleString(ctx, "exists");
+  ValkeyModule_ReplyWithSimpleString(ctx, info.exists ? "true" : "false");
+  ValkeyModule_ReplyWithSimpleString(ctx, "num_docs");
+  ValkeyModule_ReplyWithLongLong(ctx, info.num_docs);
+  ValkeyModule_ReplyWithSimpleString(ctx, "num_records");
+  ValkeyModule_ReplyWithLongLong(ctx, info.num_records);
+  ValkeyModule_ReplyWithSimpleString(ctx, "hash_indexing_failures");
+  ValkeyModule_ReplyWithLongLong(ctx, info.hash_indexing_failures);
+  ValkeyModule_ReplyWithSimpleString(ctx, "backfill_scanned_count");
+  ValkeyModule_ReplyWithLongLong(ctx, info.backfill_scanned_count);
+  ValkeyModule_ReplyWithSimpleString(ctx, "backfill_db_size");
+  ValkeyModule_ReplyWithLongLong(ctx, info.backfill_db_size);
+  ValkeyModule_ReplyWithSimpleString(ctx, "backfill_inqueue_tasks");
+  ValkeyModule_ReplyWithLongLong(ctx, info.backfill_inqueue_tasks);
+  ValkeyModule_ReplyWithSimpleString(ctx, "mutation_queue_size");
+  ValkeyModule_ReplyWithLongLong(ctx, info.mutation_queue_size);
+  ValkeyModule_ReplyWithSimpleString(ctx, "recent_mutations_queue_delay");
+  ValkeyModule_ReplyWithLongLong(ctx, info.recent_mutations_queue_delay);
+  ValkeyModule_ReplyWithSimpleString(ctx, "backfill_in_progress");
+  ValkeyModule_ReplyWithSimpleString(
+      ctx, info.backfill_in_progress ? "true" : "false");
+  ValkeyModule_ReplyWithSimpleString(ctx, "backfill_complete_percent");
+  ValkeyModule_ReplyWithDouble(ctx, info.backfill_complete_percent);
+  ValkeyModule_ReplyWithSimpleString(ctx, "state");
+  ValkeyModule_ReplyWithSimpleString(ctx, info.state.c_str());
+  if (!info.error.empty()) {
+    ValkeyModule_ReplyWithSimpleString(ctx, "error");
+    ValkeyModule_ReplyWithSimpleString(ctx, info.error.c_str());
+  }
+  // Now set the correct length (13 fields×2, plus optional error)
+  ValkeyModule_ReplySetArrayLength(ctx, info.error.empty() ? 26 : 28);
+  return VALKEYMODULE_OK;
+}
+
+void Free(ValkeyModuleCtx *ctx, void *privdata) {
+  delete static_cast<InfoAsyncResult *>(privdata);
+}
+
+int Timeout(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+  return ValkeyModule_ReplyWithSimpleString(ctx, "Request timed out");
+}
+
+}  // namespace info_async
+
 absl::Status FTInfoCmd(ValkeyModuleCtx *ctx, ValkeyModuleString **argv,
                        int argc) {
   if (argc < 2) {
@@ -83,17 +150,45 @@ absl::Status FTInfoCmd(ValkeyModuleCtx *ctx, ValkeyModuleString **argv,
     return absl::OkStatus();
   }
 
-  // TODO global info fanout
+  if (is_global) {
+    // Global info fanout - aggregate info from all cluster nodes
+    auto parameters = std::make_unique<query::info_fanout::InfoParameters>();
+    parameters->index_name = std::string(index_schema_name);
 
-  VMSDK_ASSIGN_OR_RETURN(
-      auto index_schema,
-      SchemaManager::Instance().GetIndexSchema(ValkeyModule_GetSelectedDb(ctx),
-                                               index_schema_name));
-  static const auto permissions =
-      PrefixACLPermissions(kInfoCmdPermissions, kInfoCommand);
-  VMSDK_RETURN_IF_ERROR(
-      AclPrefixCheck(ctx, permissions, index_schema->GetKeyPrefixes()));
-  index_schema->RespondWithInfo(ctx);
+    auto targets = query::info_fanout::GetInfoTargetsForFanout(ctx);
+
+    // Wrap the ctx in a BlockedClient so it stays alive until we explicitly
+    // reply:
+    vmsdk::BlockedClient blocked_client(ctx, info_async::Reply, info_async::Timeout,
+                                        info_async::Free, 5000);
+    blocked_client.MeasureTimeStart();
+
+    auto on_done = [blocked_client = std::move(blocked_client)](
+                       absl::StatusOr<query::info_fanout::InfoResult> result,
+                       std::unique_ptr<query::info_fanout::InfoParameters>
+                           params) mutable {
+      auto payload = std::make_unique<info_async::InfoAsyncResult>(
+          std::move(result), std::move(params));
+      blocked_client.SetReplyPrivateData(payload.release());
+    };
+
+    return query::info_fanout::PerformInfoFanoutAsync(
+        ctx, targets, ValkeySearch::Instance().GetCoordinatorClientPool(),
+        std::move(parameters), ValkeySearch::Instance().GetReaderThreadPool(),
+        std::move(on_done));
+
+  } else {
+    // Local info - existing implementation
+    VMSDK_ASSIGN_OR_RETURN(
+        auto index_schema,
+        SchemaManager::Instance().GetIndexSchema(
+            ValkeyModule_GetSelectedDb(ctx), index_schema_name));
+    static const auto permissions =
+        PrefixACLPermissions(kInfoCmdPermissions, kInfoCommand);
+    VMSDK_RETURN_IF_ERROR(
+        AclPrefixCheck(ctx, permissions, index_schema->GetKeyPrefixes()));
+    index_schema->RespondWithInfo(ctx);
+  }
 
   return absl::OkStatus();
 }

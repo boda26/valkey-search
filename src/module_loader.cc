@@ -106,7 +106,16 @@ vmsdk::module::Options options = {
                 .cmd_func =
                     &vmsdk::CreateCommand<valkey_search::FTAggregateCmd>,
             },
-        },
+            {
+                .cmd_name = "FT.TESTCALL",
+                .permissions = ACLPermissionFormatter(
+                    valkey_search::kDebugCmdPermissions),
+                .flags = {vmsdk::module::kReadOnlyFlag,
+                          vmsdk::module::kAdminFlag},
+                .cmd_func = &vmsdk::CreateCommand<valkey_search::FTTestCallCmd>,
+            },
+        }  // namespace
+    ,
     .on_load =
         [](ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc,
            [[maybe_unused]] const vmsdk::module::Options &options) {

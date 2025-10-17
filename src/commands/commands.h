@@ -74,6 +74,8 @@ absl::Status FTDebugCmd(ValkeyModuleCtx *ctx, ValkeyModuleString **argv,
                         int argc);
 absl::Status FTAggregateCmd(ValkeyModuleCtx *ctx, ValkeyModuleString **argv,
                             int argc);
+absl::Status FTTestCallCmd(ValkeyModuleCtx *ctx, ValkeyModuleString **argv,
+                           int argc);
 }  // namespace valkey_search
 
 #endif  // VALKEYSEARCH_SRC_COMMANDS_COMMANDS_H_

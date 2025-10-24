@@ -35,9 +35,15 @@ class FanoutOperationBase {
  public:
   explicit FanoutOperationBase() = default;
 
-  virtual ~FanoutOperationBase() = default;
+  virtual ~FanoutOperationBase() {
+    if (detached_ctx_) {
+      ValkeyModule_FreeThreadSafeContext(detached_ctx_);
+      detached_ctx_ = nullptr;
+    }
+  }
 
   void StartOperation(ValkeyModuleCtx* ctx) {
+    detached_ctx_ = ValkeyModule_GetDetachedThreadSafeContext(ctx);
     blocked_client_ = std::make_unique<vmsdk::BlockedClient>(
         ctx, &Reply, &Timeout, &Free, kNoValkeyTimeout);
     blocked_client_->MeasureTimeStart();
@@ -253,6 +259,20 @@ class FanoutOperationBase {
     OnCompletion();
   }
 
+  static void RetryTimerCallback(ValkeyModuleCtx* ctx, void* data) {
+    VMSDK_LOG(NOTICE, ctx) << "RetryTimerCallback called";
+    auto* op = static_cast<FanoutOperationBase*>(data);
+    if (!op->IsOperationTimedOut()) {
+      VMSDK_LOG(NOTICE, ctx) << "Retrying fanout operation";
+      op->ResetBaseForRetry();
+      op->ResetForRetry();
+      op->StartFanoutRound();
+    } else {
+      VMSDK_LOG(NOTICE, ctx) << "Operation timed out, calling OnTimeout";
+      op->OnTimeout();
+    }
+  }
+
   void RpcDone() {
     bool done = false;
     {
@@ -267,10 +287,20 @@ class FanoutOperationBase {
         return;
       }
       if (ShouldRetry()) {
+        // ++Metrics::GetStats().info_fanout_retry_cnt;
+        // ResetBaseForRetry();
+        // ResetForRetry();
+        // StartFanoutRound();
+        VMSDK_LOG(NOTICE, nullptr) << "RpcDone: should retry, scheduling timer";
         ++Metrics::GetStats().info_fanout_retry_cnt;
-        ResetBaseForRetry();
-        ResetForRetry();
-        StartFanoutRound();
+        // Schedule retry with delay using the stored detached context
+        VMSDK_LOG(NOTICE, nullptr) << "Creating timer for retry";
+        vmsdk::RunByMain([this]() {
+          ValkeyModule_CreateTimer(this->detached_ctx_, 100, RetryTimerCallback,
+                                   this);
+          VMSDK_LOG(NOTICE, nullptr) << "Timer created";
+        });
+        return;
       } else {
         OnCompletion();
       }
@@ -283,6 +313,7 @@ class FanoutOperationBase {
     blocked_client_->UnblockClient();
   }
 
+  ValkeyModuleCtx* detached_ctx_;
   unsigned outstanding_{0};
   absl::Mutex mutex_;
   std::unique_ptr<vmsdk::BlockedClient> blocked_client_;

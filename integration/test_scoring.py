@@ -659,13 +659,13 @@ class TestTextScoring(ValkeySearchTestCaseBase):
         for key, expected in HELLO_SCORES.items():
             assert explicit_scores[key] == pytest.approx(expected, abs=SCORE_ABS_TOL)
 
-    # 8.3: an unimplemented/unknown SCORER is rejected at parse time
+    # 8.3: an unknown SCORER is rejected at parse time.
     def test_invalid_scorer_get_rejected(self):
         client = self.server.get_new_client()
         INDEX_A.load(client)
-        with pytest.raises(ResponseError, match=r"Unknown argument `TFIDF`"):
+        with pytest.raises(ResponseError, match=r"Unknown argument `NOTASCORER`"):
             client.execute_command(
-                "FT.SEARCH", INDEX_A.index, "hello", "SCORER", "TFIDF")
+                "FT.SEARCH", INDEX_A.index, "hello", "SCORER", "NOTASCORER")
 
     # Group 9: index size N = all docs, not just text docs -----------------
 

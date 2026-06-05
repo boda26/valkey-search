@@ -14,7 +14,7 @@
 #include "src/indexes/scoring/scorer.h"
 #include "src/utils/string_interning.h"
 
-// Shared test data for Bm25StdScorer unit tests.
+// Shared test data for the Bm25StdScorer and TfidfScorer unit tests.
 namespace valkey_search::indexes::scoring::test_data {
 
 inline constexpr uint32_t kTotalDocs = 8;
@@ -47,8 +47,8 @@ inline const DocInfo kDocs[] = {
     {"doc:7", 6, 2, 1, 0, 0}, {"doc:8", 1, 0, 0, 1, 0},
 };
 
-// Per-leaf scoring inputs for the Bm25StdScorer unit tests. Mirrors the fields
-// the production search path feeds into ScoreLeaf.
+// Per-leaf scoring inputs for the scorer unit tests. Mirrors the fields the
+// production search path feeds into ScoreLeaf.
 struct LeafData {
   uint32_t total_docs = 0;
   uint64_t total_doc_len = 0;

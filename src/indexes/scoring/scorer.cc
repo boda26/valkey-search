@@ -12,6 +12,7 @@
 
 #include "absl/log/check.h"
 #include "src/indexes/scoring/bm25std_scorer.h"
+#include "src/indexes/scoring/tfidf_scorer.h"
 
 namespace valkey_search::indexes::scoring {
 
@@ -29,12 +30,12 @@ bool IsInf(float f) {
 
 const Scorer* GetScorer(ScorerType type) {
   static const Bm25StdScorer kBm25Std;
+  static const TfidfScorer kTfidf;
   switch (type) {
     case ScorerType::kBm25Std:
       return &kBm25Std;
     case ScorerType::kTfidf:
-      CHECK(false) << "TFIDF scorer not yet implemented";
-      return nullptr;
+      return &kTfidf;
   }
   CHECK(false) << "Unknown scorer type";
   return nullptr;

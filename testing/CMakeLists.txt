@@ -180,3 +180,11 @@ finalize_test_flags(text_index_test)
 
 # 8. Expr Test Suite
 add_subdirectory(expr)
+
+# 9. Scoring Test Suite
+add_executable(scoring_test
+    ${CMAKE_CURRENT_LIST_DIR}/scoring/tfidf_scorer_test.cc)
+target_include_directories(scoring_test PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(scoring_test PRIVATE testing_common_base)
+target_link_libraries(scoring_test PRIVATE scoring)
+finalize_test_flags(scoring_test)

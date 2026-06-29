@@ -81,7 +81,7 @@ struct FTSearchParserTestCase {
   bool with_sort_keys{false};
   // WITHSCORES and SCORER test fields
   bool with_scores{false};
-  query::Scorer scorer{query::Scorer::kBM25STD};
+  indexes::scoring::ScorerType scorer{indexes::scoring::ScorerType::kBm25Std};
 };
 
 class FTSearchParserTest
@@ -975,7 +975,7 @@ INSTANTIATE_TEST_SUITE_P(
             .filter_str = "* =>[KNN 5 @vec $BLOB]",
             .k = 5,
             .search_parameters_str = "SCORER BM25STD",
-            .scorer = query::Scorer::kBM25STD,
+            .scorer = indexes::scoring::ScorerType::kBm25Std,
         },
         {
             .test_name = "scorer_non_vector_query",
@@ -988,7 +988,7 @@ INSTANTIATE_TEST_SUITE_P(
             .score_as = "",
             .search_parameters_str = "SCORER TFIDF",
             .vector_query = false,
-            .scorer = query::Scorer::kTFIDF,
+            .scorer = indexes::scoring::ScorerType::kTfidf,
         },
         {
             .test_name = "withscores_and_scorer_combined",
@@ -1002,7 +1002,7 @@ INSTANTIATE_TEST_SUITE_P(
             .search_parameters_str = "WITHSCORES SCORER TFIDF",
             .vector_query = false,
             .with_scores = true,
-            .scorer = query::Scorer::kTFIDF,
+            .scorer = indexes::scoring::ScorerType::kTfidf,
         },
         // SORTBY tests
         {

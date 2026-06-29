@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/log/check.h"
@@ -30,11 +31,15 @@
 #include "src/attribute_data_type.h"
 #include "src/indexes/index_base.h"
 #include "src/indexes/numeric.h"
+#include "src/indexes/scoring/scorer.h"
 #include "src/indexes/tag.h"
 #include "src/indexes/text.h"
 #include "src/indexes/text/orproximity.h"
+#include "src/indexes/text/posting.h"
 #include "src/indexes/text/proximity.h"
+#include "src/indexes/text/rax_wrapper.h"
 #include "src/indexes/text/text_fetcher.h"
+#include "src/indexes/text/text_index.h"
 #include "src/indexes/universal_set_fetcher.h"
 #include "src/indexes/vector_base.h"
 #include "src/indexes/vector_flat.h"
@@ -633,6 +638,164 @@ float ComputeMatchedPredicateScore(const Predicate *predicate) {
   }
 }
 
+// A term leaf's posting list resolved once per query. The posting list and its
+// document frequency (dt) are identical for every candidate, so they are
+// resolved up front by ResolveLeaves rather than re-walked per document.
+struct ResolvedLeaf {
+  indexes::text::InvasivePtr<indexes::text::Postings> postings;
+  uint32_t num_doc_contain_term = 0;
+};
+
+using ResolvedLeaves = absl::flat_hash_map<const TermPredicate *, ResolvedLeaf>;
+
+// Walks the predicate tree once and resolves each TermPredicate leaf's posting
+// list (the expensive radix-tree lookup), so the per-document scoring walk only
+// does the cheap per-key lookup. A leaf whose term is absent from the index
+// maps to an empty (null) postings pointer.
+void ResolveLeaves(const Predicate *predicate, ResolvedLeaves &resolved) {
+  CHECK(predicate != nullptr);
+  switch (predicate->GetType()) {
+    case PredicateType::kComposedAnd:
+    case PredicateType::kComposedOr: {
+      auto composed = dynamic_cast<const ComposedPredicate *>(predicate);
+      for (const auto &child : composed->GetChildren()) {
+        ResolveLeaves(child.get(), resolved);
+      }
+      break;
+    }
+    case PredicateType::kText: {
+      auto term_pred = dynamic_cast<const TermPredicate *>(predicate);
+      if (!term_pred || resolved.contains(term_pred)) break;
+      auto text_index_schema = term_pred->GetTextIndexSchema();
+      CHECK(text_index_schema != nullptr);
+      auto text_index = text_index_schema->GetTextIndex();
+      CHECK(text_index != nullptr);
+      auto postings = text_index->GetPrefix().FindPostingsTarget(
+          term_pred->GetTextString());
+      const uint32_t dt = postings ? postings->GetKeyCount() : 0;
+      resolved.emplace(term_pred, ResolvedLeaf{std::move(postings), dt});
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+std::optional<float> ScoreNode(const Predicate *predicate,
+                               const InternedStringPtr &key,
+                               const IndexSchema &index_schema,
+                               const indexes::scoring::Scorer *scorer,
+                               const ResolvedLeaves &resolved) {
+  CHECK(predicate != nullptr);
+
+  switch (predicate->GetType()) {
+    case PredicateType::kComposedAnd: {
+      auto composed = dynamic_cast<const ComposedPredicate *>(predicate);
+      float sum = 0.0f;
+      for (const auto &child : composed->GetChildren()) {
+        auto child_score =
+            ScoreNode(child.get(), key, index_schema, scorer, resolved);
+        // AND: every child must match, otherwise the document does not match
+        // this group and contributes nothing from it.
+        if (!child_score) return std::nullopt;
+        sum += *child_score;
+      }
+      return predicate->GetWeight() * sum;
+    }
+    case PredicateType::kComposedOr: {
+      auto composed = dynamic_cast<const ComposedPredicate *>(predicate);
+      float sum = 0.0f;
+      bool matched = false;
+      for (const auto &child : composed->GetChildren()) {
+        auto child_score =
+            ScoreNode(child.get(), key, index_schema, scorer, resolved);
+        // OR: any matching child contributes; non-matching children are
+        // skipped.
+        if (child_score) {
+          matched = true;
+          sum += *child_score;
+        }
+      }
+      if (!matched) return std::nullopt;
+      return predicate->GetWeight() * sum;
+    }
+    case PredicateType::kText: {
+      auto term_pred = dynamic_cast<const TermPredicate *>(predicate);
+
+      // non-TermPredicate text predicates (prefix/suffix/fuzzy): not yet
+      // scored, but the document still matched, so treat as a zero contribution
+      // rather than a non-match.
+      if (!term_pred) return 0.0f;
+
+      auto it = resolved.find(term_pred);
+      CHECK(it != resolved.end());
+      const ResolvedLeaf &leaf = it->second;
+      if (!leaf.postings) return std::nullopt;
+
+      const auto *flat_map = leaf.postings->FindKey(key);
+      if (!flat_map) return std::nullopt;
+
+      uint32_t tf = static_cast<uint32_t>(flat_map->GetTermFrequency());
+
+      if (tf == 0) return std::nullopt;
+
+      indexes::scoring::LeafInput input;
+      input.total_docs = index_schema.GetIndexKeyInfoSize();
+      input.num_doc_contain_term = leaf.num_doc_contain_term;
+      input.term_frequency = tf;
+      if (scorer->Type() == indexes::scoring::ScorerType::kBm25Std) {
+        input.total_doc_len = index_schema.GetTotalDocumentLength();
+        input.doc_len = index_schema.GetDocumentLength(key);
+      }
+      return scorer->ScoreLeaf(input, predicate->GetWeight());
+    }
+    // TODO: scoring for tag/numeric.
+    case PredicateType::kNegate:
+    case PredicateType::kTag:
+    case PredicateType::kNumeric:
+    case PredicateType::kNone:
+      return 0.0f;
+  }
+  return 0.0f;
+}
+
+void ScoreTextQuery(const IndexSchema &index_schema,
+                    const Predicate *root_predicate,
+                    const indexes::scoring::Scorer *scorer,
+                    std::vector<indexes::BorrowedNeighbor> &candidates) {
+  CHECK(root_predicate != nullptr);
+  CHECK(scorer != nullptr);
+  if (candidates.empty()) return;
+
+  CHECK(index_schema.GetIndexKeyInfoSize() > 0);
+
+  // Resolve each term leaf's posting list once; the per-document walk below
+  // then only does the cheap per-key lookup.
+  ResolvedLeaves resolved;
+  ResolveLeaves(root_predicate, resolved);
+
+  std::vector<indexes::BorrowedNeighbor> scored;
+  scored.reserve(candidates.size());
+  for (const auto &c : candidates) {
+    auto key = c.key.Materialize();
+    auto score = ScoreNode(root_predicate, key, index_schema, scorer, resolved);
+    if (!score) continue;
+    const float final_score = scorer->ComposeDocumentScore(
+        *score, index_schema.GetDocumentScore(key));
+    scored.push_back({c.key, 0.0f, final_score});
+  }
+
+  // Sort by score desc, key asc (stable tie-break by document key).
+  std::sort(scored.begin(), scored.end(),
+            [](const indexes::BorrowedNeighbor &a,
+               const indexes::BorrowedNeighbor &b) {
+              if (a.score != b.score) return a.score > b.score;
+              return a.key.Str() < b.key.Str();
+            });
+
+  candidates = std::move(scored);
+}
+
 absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
     const SearchParameters &parameters) {
   std::queue<std::unique_ptr<indexes::EntriesFetcherBase>> entries_fetchers;
@@ -723,6 +886,15 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
   }
   if (fetch_limited) {
     nonvector_results_fetched_limited_count.Increment();
+  }
+  // score all the candidates after prefilter
+  if (!borrowed.empty() && !parameters.filter_parse_results.is_match_all &&
+      parameters.filter_parse_results.query_operations &
+          QueryOperations::kContainsText) {
+    const auto *scorer = indexes::scoring::GetScorer(parameters.scorer);
+    ScoreTextQuery(*parameters.index_schema,
+                   parameters.filter_parse_results.root_predicate.get(), scorer,
+                   borrowed);
   }
   return borrowed;
 }

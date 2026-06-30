@@ -85,6 +85,13 @@ constexpr double kNegativeInf = std::numeric_limits<double>::lowest();
 constexpr double kPositiveInf = std::numeric_limits<double>::infinity();
 constexpr double kNegativeInf = -std::numeric_limits<double>::infinity();
 #endif
+
+// std::isdigit/std::isspace have undefined behavior when passed a value that is
+// not representable as unsigned char (e.g. a negative value from a signed char
+// holding a non-ASCII byte). Cast through unsigned char to stay in the defined
+// domain.
+bool IsDigit(char c) { return std::isdigit(static_cast<unsigned char>(c)); }
+bool IsSpace(char c) { return std::isspace(static_cast<unsigned char>(c)); }
 }  // namespace
 
 // Helper function to print predicate tree structure using DFS
@@ -218,7 +225,7 @@ bool FilterParser::MatchInsensitive(const std::string& expected) {
 }
 
 void FilterParser::SkipWhitespace() {
-  while (!IsEnd() && std::isspace(Peek())) {
+  while (!IsEnd() && IsSpace(Peek())) {
     ++pos_;
   }
 }
@@ -230,7 +237,7 @@ absl::StatusOr<std::string> FilterParser::ParseFieldName() {
         absl::StrCat("Unexpected character at position ", pos_ + 1, ": `",
                      expression_.substr(pos_, 1), "`, expecting `@`"));
   }
-  while (!IsEnd() && Peek() != ':' && !std::isspace(Peek())) {
+  while (!IsEnd() && Peek() != ':' && !IsSpace(Peek())) {
     field_name += expression_[pos_++];
   }
   SkipWhitespace();
@@ -259,7 +266,7 @@ absl::StatusOr<double> FilterParser::ParseNumber() {
   bool exponent_sign_allowed = false;
   while (!IsEnd()) {
     const auto next = Peek();
-    if (std::isdigit(static_cast<unsigned char>(next)) || next == '.') {
+    if (IsDigit(next) || next == '.') {
       number_str += expression_[pos_++];
       exponent_sign_allowed = false;
     } else if ((next == 'e' || next == 'E') && !exponent_seen) {
@@ -919,7 +926,7 @@ absl::StatusOr<double> FilterParser::ParseQMABlock() {
   }
   // Parse the attribute name
   std::string attr_name;
-  while (!IsEnd() && Peek() != ':' && !std::isspace(Peek()) && Peek() != '}') {
+  while (!IsEnd() && Peek() != ':' && !IsSpace(Peek()) && Peek() != '}') {
     attr_name += expression_[pos_++];
   }
   // Only $weight is supported
@@ -943,7 +950,7 @@ absl::StatusOr<double> FilterParser::ParseQMABlock() {
     has_negative = true;
     number_str += expression_[pos_++];
   }
-  while (!IsEnd() && (std::isdigit(Peek()) || Peek() == '.')) {
+  while (!IsEnd() && (IsDigit(Peek()) || Peek() == '.')) {
     number_str += expression_[pos_++];
   }
   double value;
@@ -1037,7 +1044,7 @@ absl::StatusOr<FilterParser::ParseResult> FilterParser::ParseExpression(
           // Look ahead past => and optional whitespace for {
           size_t lookahead = pos_ + 2;
           while (lookahead < expression_.size() &&
-                 std::isspace(expression_[lookahead])) {
+                 IsSpace(expression_[lookahead])) {
             lookahead++;
           }
           if (lookahead < expression_.size() && expression_[lookahead] == '{') {

@@ -115,6 +115,7 @@ set(SRCS_TEXT ${CMAKE_CURRENT_LIST_DIR}/text/text_index.h
               ${CMAKE_CURRENT_LIST_DIR}/text/text_fetcher.h
               ${CMAKE_CURRENT_LIST_DIR}/text/text_fetcher.cc
               ${CMAKE_CURRENT_LIST_DIR}/text/text_iterator.h
+              ${CMAKE_CURRENT_LIST_DIR}/text/scoring_context.h
               ${CMAKE_CURRENT_LIST_DIR}/text/proximity.h
               ${CMAKE_CURRENT_LIST_DIR}/text/proximity.cc
               ${CMAKE_CURRENT_LIST_DIR}/text/orproximity.h
@@ -140,4 +141,5 @@ target_link_libraries(text PUBLIC string_interning)
 target_link_libraries(text PUBLIC valkey_module)
 target_link_libraries(text PUBLIC snowball)
 target_link_libraries(text PUBLIC scanner)
-target_link_libraries(text PUBLIC icu) 
+target_link_libraries(text PUBLIC icu)
+target_link_libraries(text PUBLIC scoring)

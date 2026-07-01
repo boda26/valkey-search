@@ -1242,4 +1242,14 @@ ContentProcessing SearchParameters::GetContentProcessing() const {
   return kContentRequired;
 }
 
+std::optional<float> RecomputeDocumentScore(const IndexSchema &index_schema,
+                                            const Predicate &root_predicate,
+                                            const InternedStringPtr &key) {
+  // Placeholder: the real per-document scorer will read live term
+  // frequency / doc length / document_score for `key` from `index_schema` and
+  // walk the predicate tree. Until then we reuse the flat predicate-weight
+  // score so the recompute pipeline is exercised end-to-end.
+  return ComputeMatchedPredicateScore(&root_predicate);
+}
+
 }  // namespace valkey_search::query

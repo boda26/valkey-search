@@ -383,5 +383,10 @@ size_t FindVectorDelimiter(absl::string_view expr);
 // to match. Exposed for testing.
 float ComputeMatchedPredicateScore(const Predicate* predicate);
 
+// TODO: Placeholder now. Replace body with per-document BM25STD/TFIDF walk
+std::optional<float> RecomputeDocumentScore(const IndexSchema& index_schema,
+                                            const Predicate& root_predicate,
+                                            const InternedStringPtr& key);
+
 }  // namespace valkey_search::query
 #endif  // VALKEYSEARCH_SRC_QUERY_SEARCH_H_

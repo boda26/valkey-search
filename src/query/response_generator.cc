@@ -449,8 +449,12 @@ void ProcessNeighborsForReply(
   // Only for non-vector queries: for KNN, Neighbor.score holds the distance
   // (lower is better) and results already arrive ascending, so a descending
   // re-sort here would reverse the correct order.
+  // Only needed in cluster mode: the coordinator's merged Neighbor vector is
+  // drained from the fanout heap without a final sort. In standalone mode the
+  // results were already sorted as BorrowedNeighbor in TrimResults.
   if (!neighbors.empty() && parameters.IsNonVectorQuery() &&
-      !parameters.sortby_parameter.has_value()) {
+      !parameters.sortby_parameter.has_value() &&
+      ValkeySearch::Instance().IsCluster()) {
     std::stable_sort(
         neighbors.begin(), neighbors.end(),
         [](const indexes::Neighbor &a, const indexes::Neighbor &b) {

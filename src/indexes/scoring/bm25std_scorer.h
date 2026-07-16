@@ -39,14 +39,7 @@ class Bm25StdScorer : public Scorer {
   // (avg_doc_len <= 0). Used by both the post-filter walk (search.cc) and the
   // in-iterator hot path (term.cc).
   float ScoreLeaf(float idf, uint32_t term_frequency, uint32_t doc_len,
-                  float avg_doc_len, float leaf_weight) const override {
-    if (avg_doc_len <= 0.0f) return 0.0f;
-    const float f = static_cast<float>(term_frequency);
-    const float dl = static_cast<float>(doc_len);
-    const float numerator = f * (kK1 + 1.0f);
-    const float denominator = f + kK1 * (1.0f - kB + kB * dl / avg_doc_len);
-    return leaf_weight * idf * (numerator / denominator);
-  }
+                  float avg_doc_len, float leaf_weight) const override;
 
   float ComposeDocumentScore(float sum_of_terms,
                              float document_score) const override;

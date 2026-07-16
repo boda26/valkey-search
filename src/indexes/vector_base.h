@@ -305,7 +305,6 @@ class PrefilterEvaluator : public query::Evaluator {
       : query::Evaluator(query_operations), text_index_(text_index) {}
   bool Evaluate(const query::Predicate& predicate,
                 const InternedStringPtr& key);
-
   const InternedStringPtr& GetTargetKey() const override {
     CHECK(key_);
     return *key_;

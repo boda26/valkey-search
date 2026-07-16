@@ -102,15 +102,7 @@ size_t Postings::GetTotalTermFrequency() const {
   return total_frequency;
 }
 
-const FlatPositionMap* Postings::FindKey(const Key& key) const {
-  auto it = key_to_positions_.find(key);
-  if (it == key_to_positions_.end()) {
-    return nullptr;
-  }
-  return it->second.map;
-}
-
-std::optional<uint32_t> Postings::GetTermFrequencyForKey(
+std::optional<uint32_t> Postings::LookupTermFrequency(
     BorrowedInternedStringPtr key) const {
   auto it = key_to_positions_.find(key.AsInternedRef());
   if (it == key_to_positions_.end()) {
@@ -197,7 +189,7 @@ PositionIterator Postings::KeyIterator::GetPositionIterator() const {
   return PositionIterator(*flat_map);
 }
 
-size_t Postings::KeyIterator::GetCurrentKeyTermFrequency() const {
+size_t Postings::KeyIterator::GetTermFrequency() const {
   CHECK(key_map_ != nullptr && current_ != end_)
       << "KeyIterator is invalid or exhausted";
   return current_->second.tf;

@@ -51,6 +51,7 @@ struct NeighborComparator {
   bool operator()(const indexes::Neighbor &a,
                   const indexes::Neighbor &b) const {
     // Primary sort: by score
+    // Currently, vector queries set score = distance. Future change expected
     // We use a max heap, to pop off the furthest vector during aggregation.
     if (a.score != b.score) {
       return a.score < b.score;

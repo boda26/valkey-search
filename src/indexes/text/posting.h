@@ -102,14 +102,8 @@ struct Postings {
   // Total frequency of the term across all keys and positions
   size_t GetTotalTermFrequency() const;
 
-  // Look up the FlatPositionMap for a specific key. Returns nullptr if the key
-  // is not in this term's posting list.
-  const FlatPositionMap* FindKey(const Key& key) const;
-
-  // Term frequency for a specific key in this posting list. Returns nullopt if
-  // the key is absent. Reads the tf mirror stored in the btree node, so it
-  // does not dereference the FlatPositionMap block.
-  std::optional<uint32_t> GetTermFrequencyForKey(
+  // lookup tf for the specific key, only used in extra-step scoring
+  std::optional<uint32_t> LookupTermFrequency(
       BorrowedInternedStringPtr key) const;
 
   // Defrag this contents of this object. Returns the updated "this" pointer.
@@ -140,8 +134,8 @@ struct Postings {
     // Get Position Iterator
     PositionIterator GetPositionIterator() const;
 
-    // Document-wide term frequency for the current key
-    size_t GetCurrentKeyTermFrequency() const;
+    // get tf for the current key, only used in iterator scoring
+    size_t GetTermFrequency() const;
 
    private:
     friend struct Postings;

@@ -33,7 +33,6 @@
 #include "src/attribute_data_type.h"
 #include "src/indexes/index_base.h"
 #include "src/indexes/numeric.h"
-#include "src/indexes/scoring/bm25std_scorer.h"
 #include "src/indexes/scoring/scorer.h"
 #include "src/indexes/tag.h"
 #include "src/indexes/text.h"
@@ -688,10 +687,19 @@ struct ResolvedLeaf {
 // a miss is a non-scored text predicate (prefix/suffix/fuzzy).
 using ResolvedLeaves = absl::flat_hash_map<const Predicate *, ResolvedLeaf>;
 
-// Walks the predicate tree once and resolves each TermPredicate leaf's posting
-// list (the expensive radix-tree lookup) and per-term weight, so the
-// per-document scoring walk only does the cheap per-key lookup. A leaf whose
-// term is absent from the index maps to an empty (null) postings pointer.
+// Runs once per query to hoist all document-independent scoring work out of the
+// per-candidate loop. Walks the predicate tree and, for each TermPredicate
+// leaf, precomputes the parts that are identical for every matching document:
+//   - the posting lists (the expensive radix-tree lookup + stem expansion),
+//   - the document frequency (dt), and
+//   - the per-term BM25 weight (IDF).
+// It also performs the one dynamic_cast needed to tell scored TermPredicates
+// apart from non-scored text predicates (prefix/suffix/fuzzy) here, so the
+// per-document walk can distinguish them with a cheap map lookup instead.
+// Results go into `resolved`, keyed on the base Predicate*; the per-document
+// walk then only does the cheap per-key term-frequency lookup. A leaf whose
+// term (and all its variants) is absent from the index resolves to empty
+// postings.
 void ResolveLeaves(const Predicate *predicate, uint32_t total_docs,
                    const indexes::scoring::Scorer *scorer,
                    ResolvedLeaves &resolved) {
@@ -828,7 +836,7 @@ std::optional<float> ScoreNode(const Predicate *predicate,
       // a doc matches the leaf if any resolved posting list contains its key.
       uint32_t tf = 0;
       for (const auto &postings : leaf.postings) {
-        if (auto tf_opt = postings->GetTermFrequencyForKey(key)) {
+        if (auto tf_opt = postings->LookupTermFrequency(key)) {
           tf += *tf_opt;
         }
       }
@@ -910,7 +918,8 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
   const auto text_index_schema =
       index_schema ? index_schema->GetTextIndexSchema() : nullptr;
 
-  static const indexes::scoring::Bm25StdScorer kBm25StdScorer;
+  const auto *bm25_scorer =
+      indexes::scoring::GetScorer(indexes::scoring::ScorerType::kBm25Std);
 
   // Scoring runs only when the text index has at
   // least one indexed document.
@@ -984,7 +993,7 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
         if (iterator_scoring_enabled) {
           if (auto *text_iter = iterator->GetTextIterator()) {
             float raw = text_iter->GetScore() * text_iter->GetWeight();
-            borrowed.back().score = kBm25StdScorer.ComposeDocumentScore(
+            borrowed.back().score = bm25_scorer->ComposeDocumentScore(
                 raw,
                 index_schema->GetDocumentScore(BorrowedInternedStringPtr(key)));
           }

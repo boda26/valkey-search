@@ -126,10 +126,9 @@ TEST(Bm25StdScorerTest, ComposeInfinityShortCircuits) {
 }
 
 // Per-document ranking (score-desc / key-asc ordering, document_score
-// multiplier, AND/OR accumulation) is exercised end-to-end through
-// ScoreTextQuery in testing/query/text_scoring_test.cc and the scoring
-// integration suite, since it depends on the predicate-tree walk rather than
-// the scorer in isolation.
+// multiplier, AND/OR accumulation) is exercised end-to-end through the scoring
+// integration suite (integration/test_scoring.py), since it depends on the
+// predicate-tree walk rather than the scorer in isolation.
 
 }  // namespace
 }  // namespace valkey_search::indexes::scoring

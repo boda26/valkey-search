@@ -10,18 +10,9 @@
 #include <cstdint>
 #include <utility>
 
-#include "src/indexes/scoring/bm25std_scorer.h"
+#include "src/indexes/scoring/scorer.h"
 
 namespace valkey_search::indexes::text {
-
-namespace {
-// The only scorer wired up today. Stateless, so a single shared instance backs
-// every leaf iterator.
-const scoring::Bm25StdScorer& StdScorer() {
-  static const scoring::Bm25StdScorer scorer;
-  return scorer;
-}
-}  // namespace
 
 TermIterator::TermIterator(
     absl::InlinedVector<Postings::KeyIterator, kWordExpansionInlineCapacity>&&
@@ -46,7 +37,7 @@ TermIterator::TermIterator(
   if (text_index_schema_ != nullptr) {
     const auto stats = text_index_schema_->GetIndexScoringStats();
     if (stats.total_docs > 0) {
-      bm25_scorer_ = &StdScorer();
+      bm25_scorer_ = scoring::GetScorer(scoring::ScorerType::kBm25Std);
       idf_ =
           bm25_scorer_->PrecomputeIDF(stats.total_docs, num_doc_contain_term_);
       avg_doc_len_ = stats.avg_doc_len;
@@ -76,7 +67,7 @@ float TermIterator::GetScore() const {
   // iterator currently positioned on this key (§5.2).
   uint32_t term_frequency = 0;
   for (size_t idx : current_key_indices_) {
-    term_frequency += key_iterators_[idx].GetCurrentKeyTermFrequency();
+    term_frequency += key_iterators_[idx].GetTermFrequency();
   }
 
   // text_index_schema_ is non-null whenever bm25_scorer_ was resolved above.

@@ -12,7 +12,7 @@
 #include <utility>
 
 #include "absl/container/inlined_vector.h"
-#include "src/indexes/scoring/bm25std_scorer.h"
+#include "src/indexes/scoring/scorer.h"
 #include "src/indexes/text.h"
 #include "src/indexes/text/flat_position_map.h"
 #include "src/indexes/text/text_iterator.h"
@@ -107,7 +107,7 @@ class TermIterator : public TextIterator {
   // idf_ (per-term) and avg_doc_len_ (corpus-wide). GetScore() combines them
   // with the per-document term frequency and doc_len via ScoreLeaf().
   // Null bm25_scorer_ means scoring is disabled (constant-stub fallback).
-  const scoring::Bm25StdScorer* bm25_scorer_{nullptr};
+  const scoring::Scorer* bm25_scorer_{nullptr};
   float idf_{0.0f};
   float avg_doc_len_{0.0f};
 

@@ -1,7 +1,7 @@
 import pytest
 from valkey import ResponseError
 from valkey.client import Valkey
-from valkey_search_test_case import ValkeySearchTestCaseDebugMode
+from valkey_search_test_case import ValkeySearchTestCaseBase
 from valkeytestframework.conftest import resource_port_tracker
 from utils import IndexingTestHelper
 
@@ -191,7 +191,7 @@ HELLO4_OR_RARE2_OUTER3_SCORES = {
 BASE_SCORE = 0.148215949535
 
 
-class TestTextScoring(ValkeySearchTestCaseDebugMode):
+class TestTextScoring(ValkeySearchTestCaseBase):
 
     # Group 1: single-term ranking ----------------------------------------
 

@@ -140,14 +140,6 @@ class TestTextScoringCluster(ValkeySearchClusterTestCase):
 
     # --- Group 3: query weights -------------------------------------------
 
-    @pytest.mark.xfail(
-        reason="Leaf query weight ($weight:5) is not applied on the cluster "
-        "fanout path: valkey-search returns the unweighted scores (docA:2 = "
-        "0.902322). Standalone applies it (test_scoring.py 3.1 asserts 5x) and "
-        "native Redis 8.6 cluster also applies it. This test asserts the "
-        "correct 5x behavior and xfails until the cluster path is fixed.",
-        strict=True,
-    )
     def test_leaf_weight_scales(self):
         self._load(INDEX_A)
         keys, scores = self._search(INDEX_A, "(hello)=>{$weight:5}")

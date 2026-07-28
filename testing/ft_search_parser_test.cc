@@ -1010,9 +1010,9 @@ INSTANTIATE_TEST_SUITE_P(
             .k = 0,
             .ef = 0,
             .score_as = "",
-            .search_parameters_str = "SCORER TFIDF",
+            .search_parameters_str = "SCORER BM25STD",
             .vector_query = false,
-            .scorer = indexes::scoring::ScorerType::kTfidf,
+            .scorer = indexes::scoring::ScorerType::kBm25Std,
         },
         {
             .test_name = "withscores_and_scorer_combined",
@@ -1023,10 +1023,24 @@ INSTANTIATE_TEST_SUITE_P(
             .k = 0,
             .ef = 0,
             .score_as = "",
-            .search_parameters_str = "WITHSCORES SCORER TFIDF",
+            .search_parameters_str = "WITHSCORES SCORER BM25STD",
             .vector_query = false,
             .with_scores = true,
-            .scorer = indexes::scoring::ScorerType::kTfidf,
+            .scorer = indexes::scoring::ScorerType::kBm25Std,
+        },
+        {
+            // TFIDF is not implemented; it must be rejected at parse time
+            // rather than accepted (which would abort at scoring).
+            .test_name = "scorer_tfidf_rejected",
+            .success = false,
+            .params_str = "",
+            .filter_str = "@attribute_identifier_1:[300 1000]",
+            .attribute_alias = "",
+            .k = 0,
+            .ef = 0,
+            .score_as = "",
+            .search_parameters_str = "SCORER TFIDF",
+            .vector_query = false,
         },
         // SORTBY tests
         {

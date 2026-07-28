@@ -122,6 +122,10 @@ class TextIndexSchema {
     uint32_t total_docs = 0;
     float avg_doc_len = 0.0f;
   };
+  // TODO-SCORING: total_docs counts text-bearing keys, but BM25's
+  // N must be ALL indexed docs (IndexSchema::GetIndexKeyInfoSize(), matching the
+  // active extra-step path and Redis). Pass that count in when enabling this
+  // path, since TextIndexSchema cannot see index_key_info_.
   IndexScoringStats GetIndexScoringStats() const {
     const uint32_t total_docs = GetTrackedKeyCount();
     const float avg_doc_len =

@@ -133,6 +133,34 @@ INDEX_C = ScoringIndex(
     },
 )
 
+# idxMix: text `body` + numeric `rank` + tag `cat`, a general-purpose combined
+# index for text + numeric/tag query tests. 4 docs have a text body; 6 have only
+# rank+cat (no text), so text-doc count (4) != total-doc count (10).
+#
+# BM25's index size N must be ALL indexed docs, not just text-bearing ones. N
+# feeds both IDF and avg_doc_len, so scores computed with the wrong N=4 diverge
+# sharply from the correct N=10. Verified against Redis 8.6: FT.INFO
+# num_docs=10 and EXPLAINSCORE uses N=10.
+_DMIX_TEXT = {
+    "d:1": {"body": "hello world", "cat": "a,b"},
+    "d:2": {"body": "hello there friend", "cat": "b"},
+    "d:3": {"body": "hello", "cat": "a"},
+    "d:4": {"body": "world only", "cat": "c"},
+}
+INDEX_MIX = ScoringIndex(
+    "idxMix",
+    ["FT.CREATE", "idxMix", "ON", "HASH", "PREFIX", "1", "d:",
+     "SCHEMA", "body", "TEXT", "NOSTEM", "rank", "NUMERIC", "cat", "TAG"],
+    {
+        **{k: {**v, "rank": str(i + 1)}
+           for i, (k, v) in enumerate(_DMIX_TEXT.items())},
+        **{f"d:{i}": {"rank": str(i), "cat": "x"} for i in range(5, 11)},
+    },
+)
+# Expected "hello" scores with the correct N=10 (all docs). With the buggy
+# N=4 (text docs only) these would be ~0.303 / ~0.203 instead.
+MIX_HELLO_SCORES = {"d:3": 0.974311, "d:1": 0.650739, "d:2": 0.650739}
+
 # =====================================================================
 # Expected scores (verified against Redis 8.6; idxA unless noted)
 # =====================================================================
@@ -524,7 +552,6 @@ class TestTextScoring(ValkeySearchTestCaseBase):
             assert scores[key] == pytest.approx(expected, abs=SCORE_ABS_TOL)
 
     # Group 8: scorer selection -------------------------------------------
-    # (8.3 SCORER TFIDF is deferred: GetScorer(kTfidf) currently aborts.)
 
     # 8.1 / 8.2: explicit SCORER BM25STD yields the same scores and order as the
     # default (no SCORER), confirming BM25STD is the default scorer.
@@ -542,3 +569,27 @@ class TestTextScoring(ValkeySearchTestCaseBase):
         # and both match the verified query 1.2 values.
         for key, expected in HELLO_SCORES.items():
             assert explicit_scores[key] == pytest.approx(expected, abs=SCORE_ABS_TOL)
+
+    # 8.3: an unimplemented/unknown SCORER is rejected at parse time
+    def test_invalid_scorer_get_rejected(self):
+        client = self.server.get_new_client()
+        INDEX_A.load(client)
+        with pytest.raises(ResponseError, match=r"Unknown argument `TFIDF`"):
+            client.execute_command(
+                "FT.SEARCH", INDEX_A.index, "hello", "SCORER", "TFIDF")
+
+    # Group 9: index size N = all docs, not just text docs -----------------
+
+    # 9.1: BM25's N must count every indexed doc, not only text-bearing ones.
+    # idxMix has 4 text docs + 6 numeric/tag-only docs (N=10). The verified
+    # scores match Redis's N=10; scoring with N=4 (text docs only) would produce
+    # ~0.303/~0.203 and fail here. Passes on the extra-step path (uses
+    # GetIndexKeyInfoSize); would fail on in-iterator (uses text-doc count).
+    def test_index_size_counts_all_docs_not_just_text(self):
+        client = self.server.get_new_client()
+        INDEX_MIX.load(client)
+        keys, scores = INDEX_MIX.search(client, "hello")
+
+        assert keys == ["d:3", "d:1", "d:2"]
+        for key, expected in MIX_HELLO_SCORES.items():
+            assert scores[key] == pytest.approx(expected, abs=SCORE_ABS_TOL)

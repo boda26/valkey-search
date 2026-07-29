@@ -371,5 +371,34 @@ void ScoreTextQuery(const IndexSchema& index_schema,
                     const indexes::scoring::Scorer* scorer,
                     std::vector<indexes::BorrowedNeighbor>& candidates);
 
+// Recomputes the composed relevance score for a SINGLE already-matched document
+// by walking the predicate tree through the exact same Scorer seam
+// ScoreTextQuery uses: ResolveLeaves (dt/IDF) -> ScoreNode (per-leaf ScoreLeaf /
+// weight + AND/OR composition) -> Scorer::ComposeDocumentScore. Every input
+// (total_docs, avg_doc_len, per-term IDF, term frequency, doc_len, document
+// score) is sourced IDENTICALLY to ScoreTextQuery, so the value returned here is
+// on the same scale as a shard-side score and ranks correctly against
+// non-recomputed neighbors. Text leaves are scored via Scorer::ScoreLeaf (NOT
+// TextIterator::GetScore); numeric/tag matched leaves contribute 1.0 * weight.
+//
+// Acquires the index reader lock internally, so callers must NOT already hold
+// it. Used by the main-thread content-fetch revalidation path
+// (response_generator.cc VerifyFilter) where a document mutated between scoring
+// and fetch needs a fresh, scale-consistent score. Returns nullopt for an empty
+// corpus or when ScoreNode reports a non-match (mirroring ScoreTextQuery's
+// per-candidate result); callers treat nullopt as "score 0", never a drop.
+std::optional<float> ScoreSingleDocument(
+    const IndexSchema& index_schema, const Predicate* root_predicate,
+    const indexes::scoring::Scorer* scorer, const InternedStringPtr& key);
+
+// Scores a single predicate node against an empty resolved-leaf set using a
+// minimal ScoreContext (unit corpus, no SCORE field). Sufficient to exercise
+// ScoreNode's numeric/tag/negate leaf cases and their AND/OR composition, which
+// depend only on predicate weights, not on term postings or per-document
+// length. Exposed for testing ScoreNode without setting up a full search.
+std::optional<float> ScoreNodeForTesting(
+    const IndexSchema& index_schema, const Predicate* predicate,
+    const indexes::scoring::Scorer* scorer);
+
 }  // namespace valkey_search::query
 #endif  // VALKEYSEARCH_SRC_QUERY_SEARCH_H_

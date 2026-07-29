@@ -859,12 +859,11 @@ std::optional<float> ScoreNode(const Predicate *predicate,
     }
     // Numeric/Tag leaves carry no IDF/TF, so a matched leaf contributes its
     // own $weight. This mirrors the historical ComputeMatchedPredicateScore
-    // leaf semantics and, deliberately, the recompute path's leaf scoring
-    // (PredicateEvaluator::ApplyLeafScore contributes 1.0 * weight), so a
-    // document scored here ranks identically if it is later revalidated by the
-    // recompute walk. A tag/numeric candidate only reaches the extra step
-    // because the pre-filter admitted it, so there is no nullopt (non-match)
-    // path here — unlike a Term leaf, which re-derives its match from tf.
+    // leaf semantics. The recompute path (ScoreSingleDocument) walks this same
+    // ScoreNode, so a document scored here ranks identically if it is later
+    // revalidated after a mutation. A tag/numeric candidate only reaches the
+    // extra step because the pre-filter admitted it, so there is no nullopt
+    // (non-match) path here — unlike a Term leaf, which re-derives its match from tf.
     case PredicateType::kTag:
     case PredicateType::kNumeric:
       return predicate->GetWeight();
@@ -954,6 +953,16 @@ std::optional<float> ScoreSingleDocument(
     const indexes::scoring::Scorer *scorer, const InternedStringPtr &key) {
   CHECK(root_predicate != nullptr);
   CHECK(scorer != nullptr);
+
+  // TimeSlicedMRMWMutex is NOT reentrant: a nested acquire on a thread that
+  // already holds a time-sliced lock can deadlock in SwitchWithWait() when the
+  // inverse mode is waiting and the time quota is exceeded. Enforce the
+  // "callers must NOT already hold the lock" contract instead of relying on
+  // the header comment.
+  CHECK(!vmsdk::IsTimeSlicedMutexHeldByCurrentThread())
+      << "ScoreSingleDocument acquires the index reader lock internally and "
+         "must not be called while a TimeSlicedMRMWMutex is already held on "
+         "this thread (non-reentrant; risk of mode-switch deadlock)";
 
   // The recompute runs on the main thread during content fetch, outside the
   // background search's reader lock, so acquire our own. ScoreTextQuery relies

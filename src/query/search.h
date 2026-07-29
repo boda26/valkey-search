@@ -382,7 +382,8 @@ void ScoreTextQuery(const IndexSchema& index_schema,
 // TextIterator::GetScore); numeric/tag matched leaves contribute 1.0 * weight.
 //
 // Acquires the index reader lock internally, so callers must NOT already hold
-// it. Used by the main-thread content-fetch revalidation path
+// it (enforced by a CHECK; the lock is non-reentrant). Used by the
+// main-thread content-fetch revalidation path
 // (response_generator.cc VerifyFilter) where a document mutated between scoring
 // and fetch needs a fresh, scale-consistent score. Returns nullopt for an empty
 // corpus or when ScoreNode reports a non-match (mirroring ScoreTextQuery's

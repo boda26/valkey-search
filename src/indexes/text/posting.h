@@ -70,6 +70,7 @@ static_assert(sizeof(FieldMask) == 16, "FieldMask should exactly be 16 bytes");
 
 using PositionMap = absl::btree_map<Position, FieldMask>;
 
+// SCORING-EXTRA-STEP-ONLY, remove when iterator scoring is done
 // Btree value: the position map pointer plus a mirror of its (immutable)
 // term frequency, co-located so tf reads avoid chasing into the separately
 // allocated FlatPositionMap block.

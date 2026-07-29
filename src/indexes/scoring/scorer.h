@@ -38,9 +38,7 @@ inline absl::string_view ScorerToString(ScorerType scorer) {
 
 // new scorers will be added here when implemented
 const absl::NoDestructor<absl::flat_hash_map<absl::string_view, ScorerType>>
-    kScorerByStr({
-        {"BM25STD", ScorerType::kBm25Std}
-    });
+    kScorerByStr({{"BM25STD", ScorerType::kBm25Std}});
 
 // Stateless, thread-safe scoring algorithm.
 class Scorer {

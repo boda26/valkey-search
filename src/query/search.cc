@@ -1141,6 +1141,22 @@ void SearchResult::TrimResults(std::vector<T> &vec,
     } else {
       std::sort(vec.begin(), vec.end(), cmp);
     }
+  } else if (parameters.IsNonVectorQuery()) {
+    // Cluster-merge non-vector path: the merged Neighbor vector is drained from
+    // the fanout heap ascending and never sorted, so sort by score descending
+    // here (before the offset trim below). Content resolution later drops some
+    // neighbors, but drops preserve relative order, so this ordering survives.
+    // KNN (vector) results already arrive ascending by distance and must not be
+    // reordered here.
+    std::stable_sort(
+        vec.begin(), vec.end(),
+        [](const indexes::Neighbor &a, const indexes::Neighbor &b) {
+          if (a.score != b.score) {
+            return a.score > b.score;
+          }
+          // Tie-break on key ascending for a deterministic order.
+          return a.external_id->Str() < b.external_id->Str();
+        });
   }
   // In standalone mode, we can optimize by trimming from front first.
   // In cluster mode on remote searches on individual shards, we cannot trim

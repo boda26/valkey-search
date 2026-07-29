@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <queue>
@@ -33,7 +34,9 @@
 #include "src/index_schema.pb.h"
 #include "src/indexes/index_base.h"
 #include "src/indexes/numeric.h"
+#include "src/indexes/scoring/scorer.h"
 #include "src/indexes/tag.h"
+#include "src/indexes/text.h"
 #include "src/indexes/vector_base.h"
 #include "src/indexes/vector_flat.h"
 #include "src/indexes/vector_hnsw.h"
@@ -1378,5 +1381,154 @@ INSTANTIATE_TEST_SUITE_P(
           absl::StrCat(distance_metric, "_", std::get<1>(info.param).test_name);
       return test_name;
     });
+
+class ScoreTextQueryTestBase : public ValkeySearchTest {
+ protected:
+  // Schema with one text field "text" and the given docs committed, so
+  // ScoreTextQuery sees real posting lists and a non-zero corpus.
+  std::shared_ptr<MockIndexSchema> BuildSchema(
+      const std::vector<std::pair<std::string, std::string>> &docs) {
+    auto schema = CreateIndexSchema(kIndexSchemaName).value();
+    EXPECT_CALL(*schema, GetIdentifier(::testing::_))
+        .Times(::testing::AnyNumber());
+    schema->CreateTextIndexSchema();
+    auto text_schema = schema->GetTextIndexSchema();
+    auto text = std::make_shared<indexes::Text>(
+        CreateTextIndexProto(/*with_suffix_trie=*/true, /*no_stem=*/true, 1.0),
+        text_schema);
+    VMSDK_EXPECT_OK(schema->AddIndex("text", "text", text));
+    for (const auto &[k, content] : docs) {
+      auto key = StringInternStore::Intern(k);
+      VMSDK_EXPECT_OK(text->AddRecord(key, content));
+      text_schema->CommitKeyData(key);
+      // Register the key so GetIndexKeyInfoSize() (total_docs) is non-zero.
+      schema->SetIndexMutationSequenceNumber(key, 0);
+    }
+    return schema;
+  }
+
+  // Score `key` against `filter`; nullopt when the predicate did not match.
+  std::optional<float> Score(MockIndexSchema &schema, absl::string_view filter,
+                             const std::string &key) {
+    TextParsingOptions options{};
+    auto parsed = FilterParser(schema, filter, options).Parse();
+    EXPECT_TRUE(parsed.ok()) << parsed.status();
+    auto interned = StringInternStore::Intern(key);
+    std::vector<indexes::BorrowedNeighbor> cands{
+        {BorrowedInternedStringPtr(interned), 0.0f, 0.0f}};
+    vmsdk::ReaderMutexLock lock(&schema.GetTimeSlicedMutex());
+    query::ScoreTextQuery(
+        schema, parsed.value().root_predicate.get(),
+        indexes::scoring::GetScorer(indexes::scoring::ScorerType::kBm25Std),
+        cands);
+    if (cands.empty()) return std::nullopt;
+    return cands[0].score;
+  }
+};
+
+// Every case has the same shape: score `filter` against `key`, compare to a
+// linear combination of baseline single-filter scores. `expected` receives the
+// baseline scores in the order they appear in `baselines`. Optional
+// `no_match_keys` asserts the filter returns nullopt for keys that must not
+// match. Case names are preserved from the deleted weight_score_test.cc.
+struct ScoreCase {
+  std::string test_name;
+  std::vector<std::pair<std::string, std::string>> docs;
+  std::string key;
+  std::vector<std::string> baselines;
+  std::string filter;
+  std::function<float(const std::vector<float> &)> expected;
+  std::vector<std::string> no_match_keys{};
+};
+
+class ScoreTextQueryTest : public ScoreTextQueryTestBase,
+                           public testing::WithParamInterface<ScoreCase> {};
+
+TEST_P(ScoreTextQueryTest, ScoreMatchesFormula) {
+  const auto &c = GetParam();
+  auto schema = BuildSchema(c.docs);
+  std::vector<float> bases;
+  for (const auto &f : c.baselines) {
+    auto s = Score(*schema, f, c.key);
+    ASSERT_TRUE(s.has_value()) << "baseline did not match: " << f;
+    bases.push_back(*s);
+  }
+  auto got = Score(*schema, c.filter, c.key);
+  ASSERT_TRUE(got.has_value()) << "filter did not match: " << c.filter;
+  EXPECT_NEAR(*got, c.expected(bases), 1e-4f);
+  for (const auto &k : c.no_match_keys) {
+    EXPECT_FALSE(Score(*schema, c.filter, k).has_value())
+        << "unexpectedly matched key: " << k;
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ScoreTextQueryTests, ScoreTextQueryTest,
+    ValuesIn<ScoreCase>({
+        // Leaf weight scales the score linearly。
+        {.test_name = "text_weight_0_1",
+         .docs = {{"key1", "hello world"}},
+         .key = "key1",
+         .baselines = {"@text:hello"},
+         .filter = "(@text:hello) => { $weight: 0.1; }",
+         .expected = [](const auto &b) { return 0.1f * b[0]; }},
+        {.test_name = "text_weight_100",
+         .docs = {{"key1", "hello world"}},
+         .key = "key1",
+         .baselines = {"@text:hello"},
+         .filter = "(@text:hello) => { $weight: 100; }",
+         .expected = [](const auto &b) { return 100.0f * b[0]; }},
+        // AND with default weight sums matching children; a missing child
+        // rejects the doc entirely.
+        {.test_name = "AndPredicateScoreSumsChildWeights",
+         .docs = {{"key1", "hello world"}, {"key2", "hello there"}},
+         .key = "key1",
+         .baselines = {"@text:hello", "@text:world"},
+         .filter = "@text:hello @text:world",
+         .expected = [](const auto &b) { return b[0] + b[1]; },
+         .no_match_keys = {"key2"}},
+        {.test_name = "AndPredicateOwnWeightMultipliesSum",
+         .docs = {{"key1", "hello world"}},
+         .key = "key1",
+         .baselines = {"@text:hello @text:world"},
+         .filter = "(@text:hello @text:world) => { $weight: 4.0; }",
+         .expected = [](const auto &b) { return 4.0f * b[0]; }},
+        {.test_name = "AndDefaultWeightChildrenSumToCount",
+         .docs = {{"key1", "hello brave new world"}},
+         .key = "key1",
+         .baselines = {"@text:hello", "@text:brave", "@text:world"},
+         .filter = "@text:hello @text:brave @text:world",
+         .expected = [](const auto &b) { return b[0] + b[1] + b[2]; }},
+        {.test_name = "OrPredicateDefaultWeightChildrenSum",
+         .docs = {{"key1", "hello world"}},
+         .key = "key1",
+         .baselines = {"@text:hello", "@text:world"},
+         .filter = "@text:hello | @text:world",
+         .expected = [](const auto &b) { return b[0] + b[1]; }},
+        {.test_name = "NestedAndWeightsComposeMultiplicatively",
+         .docs = {{"key1", "hello brave new world"}},
+         .key = "key1",
+         .baselines = {"@text:hello", "@text:brave", "@text:world"},
+         .filter = "(@text:hello @text:brave) => { $weight: 4.0; } @text:world",
+         .expected = [](const auto &b) { return 4.0f * (b[0] + b[1]) + b[2]; }},
+        // Negation is a filter, not a scoring clause: it contributes 0.
+        {.test_name = "NegateContributesZero",
+         .docs = {{"key1", "hello world"}},
+         .key = "key1",
+         .baselines = {"@text:hello"},
+         .filter = "@text:hello -@text:missing",
+         .expected = [](const auto &b) { return b[0]; }},
+        // Same, even for a doc that contains the negated term: candidate
+        // filtering happens before scoring, so ScoreNode still adds zero for
+        // the negation.
+        {.test_name = "NegateDoesNotInflateEnclosingAnd",
+         .docs = {{"key1", "hello world"}, {"key2", "hello there"}},
+         .key = "key2",
+         .baselines = {"@text:hello"},
+         .filter = "@text:hello -@text:there",
+         .expected = [](const auto &b) { return b[0]; }},
+    }),
+    [](const TestParamInfo<ScoreCase> &info) { return info.param.test_name; });
+
 }  // namespace
 }  // namespace valkey_search

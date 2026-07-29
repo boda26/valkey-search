@@ -444,27 +444,6 @@ void ProcessNeighborsForReply(
                        return !neighbor.attribute_contents.has_value();
                      }),
       neighbors.end());
-
-  // Re-sort by relevance score after main-thread re-evaluation and drops.
-  // Only for non-vector queries: for KNN, Neighbor.score holds the distance
-  // (lower is better) and results already arrive ascending, so a descending
-  // re-sort here would reverse the correct order.
-  // Only needed in cluster mode: the coordinator's merged Neighbor vector is
-  // drained from the fanout heap without a final sort. In standalone mode the
-  // results were already sorted as BorrowedNeighbor in TrimResults.
-  if (!neighbors.empty() && parameters.IsNonVectorQuery() &&
-      !parameters.sortby_parameter.has_value() &&
-      ValkeySearch::Instance().IsCluster()) {
-    std::stable_sort(
-        neighbors.begin(), neighbors.end(),
-        [](const indexes::Neighbor &a, const indexes::Neighbor &b) {
-          if (a.score != b.score) {
-            return a.score > b.score;
-          }
-          // Tie-break on key ascending for a deterministic result order
-          return a.external_id->Str() < b.external_id->Str();
-        });
-  }
 }
 
 }  // namespace valkey_search::query

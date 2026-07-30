@@ -96,12 +96,6 @@ SearchParametersInFlightGuard::~SearchParametersInFlightGuard() {
 }
 }  // namespace detail
 
-// TODO: switch to in-iterator approach after iterator refactor lands
-// Single boolean switch to select scoring approach
-// false: extra-step scoring (default)
-// true: in-iterator scoring
-constexpr bool kIteratorScoringEnabled = false;
-
 // Query operation counters
 DEV_INTEGER_COUNTER(query_stats, query_text_term_count);
 DEV_INTEGER_COUNTER(query_stats, query_text_prefix_count);
@@ -922,10 +916,18 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
   const auto *bm25_scorer =
       indexes::scoring::GetScorer(indexes::scoring::ScorerType::kBm25Std);
 
-  // Scoring runs only when the text index has at
-  // least one indexed document.
+  // Cannot skip evaluation if the query contains unsolved composed operations.
+  // Pure text queries are fully solved by the entries fetcher and use
+  // in-iterator scoring; combined (text + numeric/tag/negate) queries take the
+  // prefilter path and are scored in an extra step below.
+  const bool requires_prefilter_evaluation =
+      IsUnsolvedQuery(parameters.filter_parse_results.query_operations,
+                      parameters.filter_parse_results.is_match_all);
+
+  // In-iterator scoring runs only for pure text queries (when enabled by the
+  // switch), and only when the text index has at least one indexed document.
   const bool iterator_scoring_enabled =
-      kIteratorScoringEnabled && text_index_schema &&
+      !requires_prefilter_evaluation && text_index_schema &&
       text_index_schema->GetTrackedKeyCount() > 0;
 
   std::queue<std::unique_ptr<indexes::EntriesFetcherBase>> entries_fetchers;
@@ -959,10 +961,6 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
     borrowed.push_back({BorrowedInternedStringPtr(key), 0.0f, 0.0f});
     return true;
   };
-  // Cannot skip evaluation if the query contains unsolved composed operations.
-  bool requires_prefilter_evaluation =
-      IsUnsolvedQuery(parameters.filter_parse_results.query_operations,
-                      parameters.filter_parse_results.is_match_all);
   if (!requires_prefilter_evaluation) {
     bool needs_dedup =
         NeedsDeduplication(parameters.filter_parse_results.query_operations);
@@ -991,6 +989,7 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
         }
         borrowed.push_back({BorrowedInternedStringPtr(key), 0.0f, 0.0f});
         // Set the per-document relevance score when scoring is enabled.
+        // Only used by pure text queries
         if (iterator_scoring_enabled) {
           if (auto *text_iter = iterator->GetTextIterator()) {
             float raw = text_iter->GetScore() * text_iter->GetWeight();
@@ -1010,8 +1009,9 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
       }
     }
   } else {
-    // TODO: currently in-iterator scoring only works for pure text queries
-    // Await iterator refactor for text + numeric/tag/negate queries
+    // Combined (text + numeric/tag/negate) queries take the prefilter path and
+    // are scored in the extra step below, since in-iterator scoring only works
+    // for pure text queries.
     EvaluatePrefilteredKeys(parameters, entries_fetchers,
                             std::move(results_appender), qualified_entries,
                             /*stop_on_fetch_limit=*/true);
@@ -1020,6 +1020,7 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
     nonvector_results_fetched_limited_count.Increment();
   }
   // extra step scoring logic: score all the candidates after prefilter
+  // only used by combined (text + numeric/tag/negate) queries
   if (!iterator_scoring_enabled && !borrowed.empty() &&
       !parameters.filter_parse_results.is_match_all &&
       parameters.filter_parse_results.query_operations &

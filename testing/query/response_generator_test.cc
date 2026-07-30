@@ -302,11 +302,11 @@ TEST_F(ResponseGeneratorTest, ProcessNeighborsForReplyContentLimits) {
 // When a document mutates between shard-side scoring and content fetch
 // (db_seq != sequence_number), VerifyFilter recomputes its relevance score
 // through the same Scorer seam ScoreTextQuery uses (search.cc
-// ScoreSingleDocument) and ProcessNeighborsForReply writes it to
+// SingleDocumentScorer) and ProcessNeighborsForReply writes it to
 // Neighbor.score, then re-ranks the survivors. These tests exercise that
 // wiring end-to-end with weight leaves; the per-leaf scoring math (including
 // text via Scorer::ScoreLeaf and AND/OR composition) is covered by
-// ScoreNodeTest in search_test.cc, and ScoreSingleDocument reuses that exact
+// ScoreNodeTest in search_test.cc, and SingleDocumentScorer reuses that exact
 // ScoreNode walk, so a matched leaf recomputes to the same value here.
 
 namespace {
@@ -334,16 +334,15 @@ void RunSingleNeighborRecompute(
   neighbors.push_back(indexes::Neighbor(id, initial_neighbor_score));
   neighbors.back().sequence_number = 0;
   // index_key_info_ must contain the key so GetIndexKeyInfoSize() (the corpus
-  // size ScoreSingleDocument sources) is non-zero, matching ScoreTextQuery.
+  // size SingleDocumentScorer sources) is non-zero, matching ScoreTextQuery.
   parameters.index_schema->SetIndexMutationSequenceNumber(id, 0);
   parameters.index_schema->SetDbMutationSequenceNumber(id, mutated ? 1 : 0);
 
   EXPECT_CALL(data_type, ToProto())
       .WillRepeatedly(testing::Return(
           data_model::AttributeDataType::ATTRIBUTE_DATA_TYPE_HASH));
-  EXPECT_CALL(data_type,
-              FetchAllRecords(fake_ctx, testing::_, testing::_,
-                              absl::string_view(key), testing::_))
+  EXPECT_CALL(data_type, FetchAllRecords(fake_ctx, testing::_, testing::_,
+                                         absl::string_view(key), testing::_))
       .WillOnce([](ValkeyModuleCtx *, const std::optional<std::string> &,
                    ValkeyModuleKey *, absl::string_view,
                    const absl::flat_hash_set<absl::string_view> &)

@@ -1533,21 +1533,22 @@ INSTANTIATE_TEST_SUITE_P(
 // --- ScoreNode weight semantics: numeric/tag/negate leaves + composition ---
 //
 // ScoreNode inspects only a leaf's PredicateType and weight for non-text
-// predicates, so these tests drive it through ScoreNodeForTesting with a
-// minimal concrete predicate rather than building real Numeric/Tag indexes.
-// They lock in the contract that a matched numeric/tag leaf contributes its
-// $weight (the behavior the extra-step path shares with the recompute path),
-// while kNegate contributes nothing.
+// predicates, so these tests drive it through the public ScoreTextQuery API
+// with a minimal concrete predicate rather than building real Numeric/Tag
+// indexes. They lock in the contract that a matched numeric/tag leaf
+// contributes its $weight (the behavior the extra-step path shares with the
+// recompute path), while kNegate contributes nothing. With no SCORE field the
+// document score is 1.0, so the candidate's final score equals the ScoreNode
+// sum.
 
 // Minimal Predicate whose only observable state is its type and weight.
 class WeightLeaf : public query::Predicate {
  public:
-  WeightLeaf(query::PredicateType type, float weight)
-      : query::Predicate(type) {
+  WeightLeaf(query::PredicateType type, float weight) : query::Predicate(type) {
     SetWeight(weight);
   }
-  query::EvaluationResult Evaluate(query::Evaluator & /*evaluator*/) const
-      override {
+  query::EvaluationResult Evaluate(
+      query::Evaluator & /*evaluator*/) const override {
     return query::EvaluationResult(true);
   }
 };
@@ -1559,15 +1560,23 @@ std::unique_ptr<query::Predicate> MakeLeaf(query::PredicateType type,
 
 class ScoreNodeTest : public ValkeySearchTest {
  protected:
+  // Scores one candidate document through the public extra-step entry point.
   // Creates the index schema as a local so it is destroyed within the test
-  // body (while the global KeyspaceEventManager is still alive), rather than at
-  // fixture teardown. For numeric/tag/negate leaves ScoreNode never touches the
-  // schema, so a freshly-created empty schema is sufficient.
+  // body (while the global KeyspaceEventManager is still alive), rather than
+  // at fixture teardown. Registers one key so total_docs > 0; numeric/tag/
+  // negate leaves never touch postings, so an otherwise empty schema is
+  // sufficient.
   std::optional<float> Score(const query::Predicate *predicate) {
     auto index_schema = CreateIndexSchema(kIndexSchemaName).value();
-    const auto *scorer = indexes::scoring::GetScorer(
-        indexes::scoring::ScorerType::kBm25Std);
-    return query::ScoreNodeForTesting(*index_schema, predicate, scorer);
+    const auto *scorer =
+        indexes::scoring::GetScorer(indexes::scoring::ScorerType::kBm25Std);
+    auto key = StringInternStore::Intern("doc_key");
+    index_schema->SetIndexMutationSequenceNumber(key, 0);
+    std::vector<indexes::BorrowedNeighbor> candidates;
+    candidates.push_back({BorrowedInternedStringPtr(key), 0.0f, 0.0f});
+    query::ScoreTextQuery(*index_schema, predicate, scorer, candidates);
+    if (candidates.empty()) return std::nullopt;
+    return candidates[0].score;
   }
 };
 
@@ -1617,13 +1626,13 @@ TEST_F(ScoreNodeTest, OrSumsMatchingNumericAndTagLeaves) {
   EXPECT_FLOAT_EQ(*score, 5.0f);
 }
 
-// The recompute path (ScoreSingleDocument) MUST land on the same scale as the
+// The recompute path (SingleDocumentScorer) MUST land on the same scale as the
 // shard-side extra-step path (ScoreTextQuery): both walk the same ScoreNode and
 // compose via the same Scorer, sourcing total_docs / document score from the
 // same IndexSchema accessors. This test pins the two paths to the identical
 // value for the same key and query, so a recomputed neighbor ranks correctly
 // against non-recomputed ones.
-TEST_F(ScoreNodeTest, ScoreSingleDocumentMatchesScoreTextQuery) {
+TEST_F(ScoreNodeTest, SingleDocumentScorerMatchesScoreTextQuery) {
   auto index_schema = CreateIndexSchema(kIndexSchemaName).value();
   const auto *scorer =
       indexes::scoring::GetScorer(indexes::scoring::ScorerType::kBm25Std);
@@ -1649,9 +1658,12 @@ TEST_F(ScoreNodeTest, ScoreSingleDocumentMatchesScoreTextQuery) {
   query::ScoreTextQuery(*index_schema, composed.get(), scorer, candidates);
   ASSERT_EQ(candidates.size(), 1);
 
-  // Recompute path: score the same key in isolation.
-  auto recomputed =
-      query::ScoreSingleDocument(*index_schema, composed.get(), scorer, key);
+  // Recompute path: score the same key in isolation. Document-independent
+  // inputs are resolved once at construction, matching the per-reply reuse in
+  // response_generator.cc.
+  query::SingleDocumentScorer document_scorer(*index_schema, composed.get(),
+                                              scorer);
+  auto recomputed = document_scorer.Score(key);
   ASSERT_TRUE(recomputed.has_value());
   EXPECT_FLOAT_EQ(*recomputed, candidates[0].score);
   EXPECT_FLOAT_EQ(*recomputed, 10.0f);

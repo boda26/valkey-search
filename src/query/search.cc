@@ -96,9 +96,10 @@ SearchParametersInFlightGuard::~SearchParametersInFlightGuard() {
 }
 }  // namespace detail
 
-// TODO: in-iterator scoring approach. Disabled for now while the post-filter
-// ScoreTextQuery path is the active scorer; re-enable once the extra step is
-// removed.
+// TODO: switch to in-iterator approach after iterator refactor lands
+// Single boolean switch to select scoring approach
+// false: extra-step scoring (default)
+// true: in-iterator scoring
 constexpr bool kIteratorScoringEnabled = false;
 
 // Query operation counters
@@ -1019,7 +1020,8 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
     nonvector_results_fetched_limited_count.Increment();
   }
   // extra step scoring logic: score all the candidates after prefilter
-  if (!borrowed.empty() && !parameters.filter_parse_results.is_match_all &&
+  if (!iterator_scoring_enabled && !borrowed.empty() &&
+      !parameters.filter_parse_results.is_match_all &&
       parameters.filter_parse_results.query_operations &
           QueryOperations::kContainsText) {
     const auto *scorer = indexes::scoring::GetScorer(parameters.scorer);

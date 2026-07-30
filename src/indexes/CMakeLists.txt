@@ -2,6 +2,8 @@ valkey_search_create_proto_library("src/index_schema.proto"
                                    "index_schema_cc_proto")
 
 set(SRCS_SCORING
+    ${CMAKE_CURRENT_LIST_DIR}/scoring/slop_calculator.h
+    ${CMAKE_CURRENT_LIST_DIR}/scoring/slop_calculator.cc
     ${CMAKE_CURRENT_LIST_DIR}/scoring/scoring_stats.h
     ${CMAKE_CURRENT_LIST_DIR}/scoring/scorer.h
     ${CMAKE_CURRENT_LIST_DIR}/scoring/scorer.cc

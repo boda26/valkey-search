@@ -96,12 +96,6 @@ SearchParametersInFlightGuard::~SearchParametersInFlightGuard() {
 }
 }  // namespace detail
 
-// TODO: switch to in-iterator approach after iterator refactor lands
-// Single boolean switch to select scoring approach
-// false: extra-step scoring (default)
-// true: in-iterator scoring
-constexpr bool kIteratorScoringEnabled = false;
-
 // Query operation counters
 DEV_INTEGER_COUNTER(query_stats, query_text_term_count);
 DEV_INTEGER_COUNTER(query_stats, query_text_prefix_count);
@@ -1031,10 +1025,21 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
   const auto *bm25_scorer =
       indexes::scoring::GetScorer(indexes::scoring::ScorerType::kBm25Std);
 
-  // Scoring runs only when the text index has at
-  // least one indexed document.
+  // In-iterator scoring captures only the text iterator's score/weight, so it
+  // is valid solely for genuinely pure-text queries. Any query that also
+  // contains a numeric, tag, or negation predicate -- including mixed OR
+  // compositions that IsUnsolvedQuery leaves on the entries-fetcher path --
+  // must be scored via ScoreTextQuery below so both enclosing and leaf
+  // predicate weights survive.
+  const bool has_non_text_predicate =
+      parameters.filter_parse_results.query_operations &
+      (QueryOperations::kContainsNumeric | QueryOperations::kContainsTag |
+       QueryOperations::kContainsNegate);
+
+  // In-iterator scoring runs only for pure text queries (when enabled by the
+  // switch), and only when the text index has at least one indexed document.
   const bool iterator_scoring_enabled =
-      kIteratorScoringEnabled && text_index_schema &&
+      !has_non_text_predicate && text_index_schema &&
       text_index_schema->GetTrackedKeyCount() > 0;
 
   std::queue<std::unique_ptr<indexes::EntriesFetcherBase>> entries_fetchers;
@@ -1069,7 +1074,7 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
     return true;
   };
   // Cannot skip evaluation if the query contains unsolved composed operations.
-  bool requires_prefilter_evaluation =
+  const bool requires_prefilter_evaluation =
       IsUnsolvedQuery(parameters.filter_parse_results.query_operations,
                       parameters.filter_parse_results.is_match_all);
   if (!requires_prefilter_evaluation) {
@@ -1099,6 +1104,8 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
           break;
         }
         borrowed.push_back({BorrowedInternedStringPtr(key), 0.0f, 0.0f});
+        // Set the per-document relevance score when scoring is enabled.
+        // Only used by pure text queries
         if (iterator_scoring_enabled) {
           if (auto *text_iter = iterator->GetTextIterator()) {
             float raw = text_iter->GetScore() * text_iter->GetWeight();
@@ -1118,8 +1125,9 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
       }
     }
   } else {
-    // TODO: currently in-iterator scoring only works for pure text queries
-    // Await iterator refactor for text + numeric/tag/negate queries
+    // Combined (text + numeric/tag/negate) queries take the prefilter path and
+    // are scored in the extra step below, since in-iterator scoring only works
+    // for pure text queries.
     EvaluatePrefilteredKeys(parameters, entries_fetchers,
                             std::move(results_appender), qualified_entries,
                             /*stop_on_fetch_limit=*/true);
@@ -1127,13 +1135,8 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
   if (fetch_limited) {
     nonvector_results_fetched_limited_count.Increment();
   }
-  // extra step scoring logic: score all the candidates after prefilter. Runs
-  // for every non-match-all query, including pure numeric/tag trees (their
-  // leaves contribute $weight; see ScoreNode). This keeps the initial pass
-  // consistent with the recompute path (SingleDocumentScorer), which is gated
-  // on IsNonVectorQuery() only — otherwise a mutated document would receive a
-  // real score while its unmutated peers carry 0.0, spuriously promoting it in
-  // the post-recompute re-rank. Match-all (`*`) has no predicate to score.
+  // extra step scoring logic: score all the candidates after prefilter
+  // only used by combined (text + numeric/tag/negate) queries
   if (!iterator_scoring_enabled && !borrowed.empty() &&
       !parameters.filter_parse_results.is_match_all) {
     const auto *scorer = indexes::scoring::GetScorer(parameters.scorer);

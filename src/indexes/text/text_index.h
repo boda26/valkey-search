@@ -11,6 +11,7 @@
 #include <atomic>
 #include <bitset>
 #include <cctype>
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -122,12 +123,16 @@ class TextIndexSchema {
     uint32_t total_docs = 0;
     float avg_doc_len = 0.0f;
   };
-  // TODO-SCORING: total_docs counts text-bearing keys, but BM25's
-  // N must be ALL indexed docs (IndexSchema::GetIndexKeyInfoSize(), matching
-  // the active extra-step path and Redis). Pass that count in when enabling
-  // this path, since TextIndexSchema cannot see index_key_info_.
+  // BM25's N must be ALL indexed docs (IndexSchema::GetIndexKeyInfoSize()),
+  // matching the extra-step path and Redis, not just text-bearing keys.
+  // IndexSchema wires that count in via SetTotalDocsProvider (TextIndexSchema
+  // cannot see index_key_info_); GetTrackedKeyCount is the fallback if unset.
+  void SetTotalDocsProvider(std::function<uint32_t()> provider) {
+    total_docs_provider_ = std::move(provider);
+  }
   IndexScoringStats GetIndexScoringStats() const {
-    const uint32_t total_docs = GetTrackedKeyCount();
+    const uint32_t total_docs =
+        total_docs_provider_ ? total_docs_provider_() : GetTrackedKeyCount();
     const float avg_doc_len =
         total_docs > 0
             ? static_cast<float>(metadata_.total_doc_len.load()) / total_docs
@@ -255,6 +260,10 @@ class TextIndexSchema {
   // Schema-level stem field mask (mirrored from
   // IndexSchema::stem_text_field_mask_)
   uint64_t stem_text_field_mask_ = 0;
+
+  // Returns the total indexed doc count (all docs, not just text-bearing) for
+  // BM25's N. Wired by IndexSchema via SetTotalDocsProvider.
+  std::function<uint32_t()> total_docs_provider_;
 
  public:
   // FT.INFO stats for text index

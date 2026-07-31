@@ -592,3 +592,33 @@ class TestTextScoring(ValkeySearchTestCaseBase):
         assert keys == ["d:3", "d:1", "d:2"]
         for key, expected in MIX_HELLO_SCORES.items():
             assert scores[key] == pytest.approx(expected, abs=SCORE_ABS_TOL)
+
+    # Group 10: mixed text + numeric OR scoring ----------------------------
+
+    # 10.1: a text branch OR'd with a numeric branch under an outer group weight
+    # applies that weight to each admitted doc's text score. The numeric branch
+    # matches no doc (ranks are 1..10), so only the three "hello" docs are
+    # admitted, each scored on hello times the outer weight 3.
+    def test_mixed_text_numeric_or_preserves_group_weight(self):
+        client = self.server.get_new_client()
+        INDEX_MIX.load(client)
+        keys, scores = INDEX_MIX.search(
+            client, "(hello | @rank:[1000 1000])=>{$weight:3}")
+
+        assert set(keys) == {"d:1", "d:2", "d:3"}
+        for key, base in MIX_HELLO_SCORES.items():
+            assert scores[key] == pytest.approx(3 * base, abs=SCORE_ABS_TOL)
+
+    # 10.2: an unweighted text | numeric OR returns the union of the hello docs
+    # and the numeric match (d:5 has rank=5, no body); text docs keep their
+    # verified hello scores and the numeric-only doc contributes no text score.
+    def test_mixed_text_numeric_or_union_membership(self):
+        client = self.server.get_new_client()
+        INDEX_MIX.load(client)
+        keys, scores = INDEX_MIX.search(client, "hello | @rank:[5 5]")
+
+        assert set(keys) == {"d:1", "d:2", "d:3", "d:5"}
+        for key, base in MIX_HELLO_SCORES.items():
+            assert scores[key] == pytest.approx(base, abs=SCORE_ABS_TOL)
+        # numeric-only match carries no text term, so no text score.
+        assert scores["d:5"] == pytest.approx(0.0, abs=SCORE_ABS_TOL)

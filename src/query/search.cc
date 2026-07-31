@@ -916,18 +916,20 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
   const auto *bm25_scorer =
       indexes::scoring::GetScorer(indexes::scoring::ScorerType::kBm25Std);
 
-  // Cannot skip evaluation if the query contains unsolved composed operations.
-  // Pure text queries are fully solved by the entries fetcher and use
-  // in-iterator scoring; combined (text + numeric/tag/negate) queries take the
-  // prefilter path and are scored in an extra step below.
-  const bool requires_prefilter_evaluation =
-      IsUnsolvedQuery(parameters.filter_parse_results.query_operations,
-                      parameters.filter_parse_results.is_match_all);
+  // In-iterator scoring captures only the text iterator's score/weight, so it is
+  // valid solely for genuinely pure-text queries. Any query that also contains a
+  // numeric, tag, or negation predicate -- including mixed OR compositions that
+  // IsUnsolvedQuery leaves on the entries-fetcher path -- must be scored via
+  // ScoreTextQuery below so both enclosing and leaf predicate weights survive.
+  const bool has_non_text_predicate =
+      parameters.filter_parse_results.query_operations &
+      (QueryOperations::kContainsNumeric | QueryOperations::kContainsTag |
+       QueryOperations::kContainsNegate);
 
   // In-iterator scoring runs only for pure text queries (when enabled by the
   // switch), and only when the text index has at least one indexed document.
   const bool iterator_scoring_enabled =
-      !requires_prefilter_evaluation && text_index_schema &&
+      !has_non_text_predicate&& text_index_schema &&
       text_index_schema->GetTrackedKeyCount() > 0;
 
   std::queue<std::unique_ptr<indexes::EntriesFetcherBase>> entries_fetchers;
@@ -961,6 +963,10 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
     borrowed.push_back({BorrowedInternedStringPtr(key), 0.0f, 0.0f});
     return true;
   };
+  // Cannot skip evaluation if the query contains unsolved composed operations.
+  const bool requires_prefilter_evaluation =
+      IsUnsolvedQuery(parameters.filter_parse_results.query_operations,
+                      parameters.filter_parse_results.is_match_all);
   if (!requires_prefilter_evaluation) {
     bool needs_dedup =
         NeedsDeduplication(parameters.filter_parse_results.query_operations);

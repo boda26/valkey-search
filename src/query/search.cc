@@ -916,11 +916,12 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
   const auto *bm25_scorer =
       indexes::scoring::GetScorer(indexes::scoring::ScorerType::kBm25Std);
 
-  // In-iterator scoring captures only the text iterator's score/weight, so it is
-  // valid solely for genuinely pure-text queries. Any query that also contains a
-  // numeric, tag, or negation predicate -- including mixed OR compositions that
-  // IsUnsolvedQuery leaves on the entries-fetcher path -- must be scored via
-  // ScoreTextQuery below so both enclosing and leaf predicate weights survive.
+  // In-iterator scoring captures only the text iterator's score/weight, so it
+  // is valid solely for genuinely pure-text queries. Any query that also
+  // contains a numeric, tag, or negation predicate -- including mixed OR
+  // compositions that IsUnsolvedQuery leaves on the entries-fetcher path --
+  // must be scored via ScoreTextQuery below so both enclosing and leaf
+  // predicate weights survive.
   const bool has_non_text_predicate =
       parameters.filter_parse_results.query_operations &
       (QueryOperations::kContainsNumeric | QueryOperations::kContainsTag |
@@ -929,7 +930,7 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
   // In-iterator scoring runs only for pure text queries (when enabled by the
   // switch), and only when the text index has at least one indexed document.
   const bool iterator_scoring_enabled =
-      !has_non_text_predicate&& text_index_schema &&
+      !has_non_text_predicate && text_index_schema &&
       text_index_schema->GetTrackedKeyCount() > 0;
 
   std::queue<std::unique_ptr<indexes::EntriesFetcherBase>> entries_fetchers;

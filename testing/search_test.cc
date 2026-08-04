@@ -1604,6 +1604,15 @@ INSTANTIATE_TEST_SUITE_P(
          .baselines = {"@color:{red}", "@color:{blue}"},
          .filter = "@color:{red|blue}",
          .expected = [](const auto &b) { return b[0] + b[1]; }},
+        // A union of values that collapse to the same tag under the index's
+        // case rules ({red|Red} on a case-insensitive index) must score the
+        // value ONCE, not once per query spelling.
+        {.test_name = "TagUnionCaseVariantsScoreOnce",
+         .docs = {{"d1", "aa bb", "red"}, {"d2", "aa bb", "blue"}},
+         .key = "d1",
+         .baselines = {"@color:{red}"},
+         .filter = "@color:{red|Red}",
+         .expected = [](const auto &b) { return b[0]; }},
     }),
     [](const TestParamInfo<ScoreCase> &info) { return info.param.test_name; });
 

@@ -28,6 +28,7 @@
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
@@ -625,42 +626,6 @@ absl::StatusOr<std::vector<indexes::Neighbor>> MaybeAddIndexedContent(
   return results;
 }
 
-// Computes the weighted score for a predicate tree where the document is known
-// to match. For AND predicates, all children match so we sum their weighted
-// contributions. For OR predicates, we use the predicate's own weight (since we
-// don't know which branch matched without re-evaluation). For leaf predicates,
-// the contribution is 1.0 * weight.
-float ComputeMatchedPredicateScore(const Predicate *predicate) {
-  if (!predicate) {
-    return 0.0f;
-  }
-  switch (predicate->GetType()) {
-    case PredicateType::kComposedAnd: {
-      auto composed = dynamic_cast<const ComposedPredicate *>(predicate);
-      float score = 0.0f;
-      for (const auto &child : composed->GetChildren()) {
-        score += ComputeMatchedPredicateScore(child.get());
-      }
-      // Apply the composed predicate's own weight as a multiplier
-      return score * predicate->GetWeight();
-    }
-    case PredicateType::kComposedOr: {
-      // Use the predicate's own weight as the contribution
-      return 1.0f * predicate->GetWeight();
-    }
-    case PredicateType::kNegate: {
-      // Negation is a filter, not a scoring clause.
-      return 0.0f;
-    }
-    case PredicateType::kTag:
-    case PredicateType::kNumeric:
-    case PredicateType::kText:
-      return 1.0f * predicate->GetWeight();
-    default:
-      return 0.0f;
-  }
-}
-
 // A term leaf's posting lists resolved once per query. A term matches via its
 // original word plus any stem variants that stem to the same root (mirroring
 // TermPredicate::Evaluate), so a leaf can resolve to several posting lists. The
@@ -790,7 +755,14 @@ void ResolveLeaves(const Predicate *predicate, uint32_t total_docs,
       // contributing its own term.
       ResolvedLeaf leaf;
       leaf.tag_index = tag_index;
+      // Dedupe query values that collapse to the same tag under the index's
+      // case rules (e.g. `{red|Red}` on a case-insensitive index)
+      const bool case_sensitive = tag_index->IsCaseSensitive();
+      absl::flat_hash_set<std::string> seen;
       for (const auto &value : tag_pred->GetTags()) {
+        std::string norm =
+            case_sensitive ? value : absl::AsciiStrToLower(value);
+        if (!seen.insert(norm).second) continue;
         uint32_t dt = static_cast<uint32_t>(std::min<size_t>(
             tag_index->GetTagValueDocCount(value), total_docs));
         // A value absent from the index (dt == 0) has no matching document and

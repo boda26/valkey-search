@@ -198,6 +198,19 @@ INDEX_TAG_ONLY = ScoringIndex(
         "t:3": {"cat": "green"},
     },
 )
+# index with numeric and tag field (no text field)
+INDEX_NUM_TAG = ScoringIndex(
+    "idxNumTag",
+    ["FT.CREATE", "idxNumTag", "ON", "HASH", "PREFIX", "1", "nt:",
+     "SCHEMA", "rank", "NUMERIC", "cat", "TAG"],
+    {
+        "nt:1": {"rank": 1, "cat": "red"},
+        "nt:2": {"rank": 2, "cat": "red,blue"},
+        "nt:3": {"rank": 3, "cat": "green"},
+        "nt:4": {"rank": 4, "cat": "red,green"},
+        "nt:5": {"rank": 5, "cat": "blue"},
+    },
+)
 
 # =====================================================================
 # Expected scores (verified against Redis 8.6; idxA unless noted)
@@ -760,5 +773,21 @@ class TestTextScoring(ValkeySearchTestCaseBase):
         keys, scores = INDEX_TAG_ONLY.search(client, "@cat:{red}")
 
         assert set(keys) == {"t:1", "t:2"}
+        for score in scores.values():
+            assert score == pytest.approx(0.0, abs=SCORE_ABS_TOL)
+
+    # 12.3: on a numeric and tag index (no text field), the scores are all 0
+    def test_num_tag_index_scores_zero(self):
+        client = self.server.get_new_client()
+        INDEX_NUM_TAG.load(client)
+        # search by tag red, get 3 docs with score 0
+        keys, scores = INDEX_NUM_TAG.search(client, "@cat:{red}")
+        assert len(keys) == 3
+        for score in scores.values():
+            assert score == pytest.approx(0.0, abs=SCORE_ABS_TOL)
+
+        # search by numeric range 1-5, get 5 docs with score 0
+        keys, scores = INDEX_NUM_TAG.search(client, "@rank:[1 5]")
+        assert len(keys) == 5
         for score in scores.values():
             assert score == pytest.approx(0.0, abs=SCORE_ABS_TOL)

@@ -938,7 +938,8 @@ void ScoreTextQuery(const IndexSchema &index_schema,
   if (total_docs == 0) return;
 
   // Resolve each term leaf's posting list and per-term weight once; the
-  // per-document walk below then only does the cheap per-key lookup. A match-all
+  // per-document walk below then only does the cheap per-key lookup. A
+  // match-all
   // (`*`) query has no predicate: there are no leaves to resolve and the loop
   // below scores every document with the constant wildcard leaf instead.
   ResolvedLeaves resolved;
@@ -975,11 +976,10 @@ void ScoreTextQuery(const IndexSchema &index_schema,
     } else {
       // Match-all (`*`): Redis scores the wildcard as a single BM25 leaf with a
       // constant IDF (1.0) and term frequency (1), normalized by the document's
-      // text length. On a text-less index avg_doc_len is 0 and ScoreLeaf returns
-      // a well-defined 0.
-      const uint32_t doc_len = score_ctx.needs_doc_len
-                                   ? index_schema.GetDocumentLength(key)
-                                   : 0;
+      // text length. On a text-less index avg_doc_len is 0 and ScoreLeaf
+      // returns a well-defined 0.
+      const uint32_t doc_len =
+          score_ctx.needs_doc_len ? index_schema.GetDocumentLength(key) : 0;
       score = scorer->ScoreLeaf({/*idf=*/1.0f, /*term_frequency=*/1, doc_len,
                                  score_ctx.avg_doc_len, /*leaf_weight=*/1.0f});
     }
@@ -1212,9 +1212,8 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
   // universal-set scan carries no TextIterator, so in-iterator scoring is inert
   // for it (iterator_scoring_enabled may still be true) and it must be scored
   // here via the null-predicate wildcard branch in ScoreTextQuery.
-  if (!borrowed.empty() &&
-      (parameters.filter_parse_results.is_match_all ||
-       !iterator_scoring_enabled)) {
+  if (!borrowed.empty() && (parameters.filter_parse_results.is_match_all ||
+                            !iterator_scoring_enabled)) {
     ScoreTextQuery(*parameters.index_schema,
                    parameters.filter_parse_results.root_predicate.get(), scorer,
                    borrowed);

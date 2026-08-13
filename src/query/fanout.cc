@@ -53,7 +53,8 @@ struct NeighborComparator {
     // Max heap on distance, to pop off the furthest vector during KNN
     // aggregation. Hybrid text=>[KNN] sets score to text relevance, so key on
     // distance (not score) to evict correctly. Non-vector queries all have
-    // distance 0 and are never evicted (see AddResult), falling to the tie-break.
+    // distance 0 and are never evicted (see AddResult), falling to the
+    // tie-break.
     if (a.distance != b.distance) {
       return a.distance < b.distance;
     }

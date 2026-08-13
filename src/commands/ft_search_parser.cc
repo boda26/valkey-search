@@ -251,6 +251,20 @@ static vmsdk::KeyValueParser<SearchCommand> SearchParser = CreateSearchParser();
 absl::Status SearchCommand::PostParseQueryString() {
   VMSDK_RETURN_IF_ERROR(query::SearchParameters::PostParseQueryString());
 
+  // The vector score reply field (KNN `AS`, or the default __<field>_score) is
+  // a synthesized field. If it collides with a declared schema attribute,
+  // SORTBY / WITHSORTKEYS on that name would route to the vector distance
+  // instead of the field, silently corrupting the order. Reject it (Redis does
+  // the same at parse time). GetIndex looks up the alias in the real
+  // attribute map (GetIdentifier is virtual and may be mocked in tests).
+  if (score_as && IsVectorQuery()) {
+    auto score_as_view = vmsdk::ToStringView(score_as.get());
+    if (index_schema->GetIndex(score_as_view).ok()) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Property `", score_as_view, "` already exists in schema"));
+    }
+  }
+
   if (sortby_parameter.has_value()) {
     // The vector score field (KNN distance, reported via score_as) is a
     // synthesized reply field, not a schema attribute, so it is sortable

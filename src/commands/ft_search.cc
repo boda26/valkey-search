@@ -83,6 +83,9 @@ void ReplyScoreTopLevel(ValkeyModuleCtx *ctx,
       ctx, vmsdk::MakeUniqueValkeyString(score_value).get());
 }
 
+std::string GetSortKeyValue(const indexes::Neighbor &neighbor,
+                            const SearchCommand &command);
+
 void SerializeNeighbors(ValkeyModuleCtx *ctx,
                         const query::SearchResult &search_result,
                         const SearchCommand &parameters) {
@@ -97,8 +100,17 @@ void SerializeNeighbors(ValkeyModuleCtx *ctx,
   const bool emit_top_level_score =
       parameters.with_scores && query::QueryHasTextPredicate(parameters);
 
-  ValkeyModule_ReplyWithArray(
-      ctx, (emit_top_level_score ? 3 : 2) * range.count() + 1);
+  // WITHSORTKEYS: emit the sort key (prefixed with '#') after the optional
+  // score.
+  const bool emit_sort_key = parameters.with_sort_keys;
+  const bool sort_by_vec_score =
+      parameters.sortby_parameter.has_value() && parameters.score_as &&
+      parameters.sortby_parameter->field ==
+          vmsdk::ToStringView(parameters.score_as.get());
+
+  const size_t elements_per_result =
+      2 + (emit_top_level_score ? 1 : 0) + (emit_sort_key ? 1 : 0);
+  ValkeyModule_ReplyWithArray(ctx, elements_per_result * range.count() + 1);
   ReplyAvailNeighbors(ctx, search_result, parameters);
 
   for (auto i = range.start_index; i < range.end_index; ++i) {
@@ -106,6 +118,14 @@ void SerializeNeighbors(ValkeyModuleCtx *ctx,
         ctx, vmsdk::MakeUniqueValkeyString(*neighbors[i].external_id).get());
     if (emit_top_level_score) {
       ReplyScoreTopLevel(ctx, neighbors[i]);
+    }
+    if (emit_sort_key) {
+      std::string value = sort_by_vec_score
+                              ? absl::StrFormat("%.12g", neighbors[i].distance)
+                              : GetSortKeyValue(neighbors[i], parameters);
+      std::string prefixed_value = "#" + value;
+      ValkeyModule_ReplyWithString(
+          ctx, vmsdk::MakeUniqueValkeyString(prefixed_value).get());
     }
     if (parameters.return_attributes.empty()) {
       ValkeyModule_ReplyWithArray(

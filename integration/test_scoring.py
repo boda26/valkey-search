@@ -882,3 +882,20 @@ class TestTextScoring(ValkeySearchTestCaseBase):
         # scores are still the text (BM25) scores, unchanged by SORTBY.
         for key, expected in HV_HYBRID_SCORES.items():
             assert scores[key] == pytest.approx(expected, abs=SCORE_ABS_TOL)
+
+    # 14.3: WITHSORTKEYS on a hybrid `text=>[KNN]` sorted by __vec_score emits
+    # each result's sort key (the vector distance) prefixed with '#', since
+    # __vec_score is a synthesized field, not a stored attribute. Reply layout
+    # (no WITHSCORES) is [count, key, sortkey, attrs, ...].
+    def test_hybrid_sortby_vector_distance_withsortkeys(self):
+        client = self.server.get_new_client()
+        INDEX_HV.load(client)
+        res = client.execute_command(
+            "FT.SEARCH", "idxHV", "cat=>[KNN 2 @vec $q]",
+            "SORTBY", "__vec_score", "WITHSORTKEYS",
+            "PARAMS", "2", "q", _vec(1.0, 1.0), "DIALECT", "2")
+
+        assert res[0] == 2
+        # nearest first: hv:long (distance 0) then hv:short (distance 32).
+        assert res[1] == b"hv:long" and res[2] == b"#0"
+        assert res[4] == b"hv:short" and res[5] == b"#32"

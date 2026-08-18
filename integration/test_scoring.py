@@ -156,8 +156,12 @@ _DMIX_TEXT = {
 }
 INDEX_MIX = ScoringIndex(
     "idxMix",
+    # WITHSUFFIXTRIE enables suffix queries; it is a lookup structure only and
+    # does not change tokenization or scores, so the verified constants below
+    # (and the existing idxMix tests) are unaffected.
     ["FT.CREATE", "idxMix", "ON", "HASH", "PREFIX", "1", "d:",
-     "SCHEMA", "body", "TEXT", "NOSTEM", "rank", "NUMERIC", "cat", "TAG"],
+     "SCHEMA", "body", "TEXT", "NOSTEM", "WITHSUFFIXTRIE", "rank", "NUMERIC",
+     "cat", "TAG"],
     {
         **{k: {**v, "rank": str(i + 1)}
            for i, (k, v) in enumerate(_DMIX_TEXT.items())},
@@ -239,6 +243,62 @@ INDEX_HV = ScoringIndex(
 # Hybrid text scores (verified against Redis 8.6). __vec_score (distance): 32 for
 # hv:short, 0 for hv:long.
 HV_HYBRID_SCORES = {"hv:short": 0.267405, "hv:long": 0.138313}
+
+# idxPSF: NOSTEM + suffix trie, for prefix/suffix/fuzzy EXPANSION scoring.
+#
+# NOTE — unlike every other index in this file, the prefix/suffix/fuzzy tests do
+# NOT pin Redis EXPLAINSCORE values. An expansion is scored on a SINGLE matched
+# term (its own IDF+F, never the sum over matched terms), but WHICH term is an
+# unspecified, corpus-dependent union-iterator artifact
+# (docs/redis_prefix_suffix_fuzzy_scoring.md §2). On a doc that matches via
+# several expansion terms we deliberately pick a different representative than
+# Redis, so pinning Redis's numbers would be spuriously incompatible. Instead
+# these tests assert self-consistent relationships against our OWN exact-term
+# scores on the same index:
+#   - single-match doc  == the exact-term query (this DOES agree with Redis), and
+#   - multi-match doc    == ONE matched term's score AND < the sum of both
+#     (the invariant, independent of which term wins).
+#
+# Terms: cat* -> {cat, category(dt=3), catalog}; *ing -> {running, jogging};
+# %cat% neighbourhood here is just {cat} (dog/others are >1 edit away).
+INDEX_PSF = ScoringIndex(
+    "idxPSF",
+    ["FT.CREATE", "idxPSF", "ON", "HASH", "PREFIX", "1", "psf:",
+     "SCHEMA", "body", "TEXT", "NOSTEM", "WITHSUFFIXTRIE"],
+    {
+        "psf:cat": {"body": "cat"},
+        "psf:multi": {"body": "category catalog"},
+        "psf:cat2": {"body": "category"},
+        "psf:cat3": {"body": "category"},
+        "psf:run": {"body": "running"},
+        "psf:jog": {"body": "jogging"},
+        "psf:dog": {"body": "dog"},
+    },
+)
+
+# idxTPX: text `body` + tag `cat` + numeric `rank`, for TAG PREFIX expansion
+# scoring. Like the text prefix/suffix/fuzzy tests (INDEX_PSF), a tag prefix
+# `@cat:{red*}` contributes exactly ONE matched value's BM25 (F == 1, its own
+# IDF), never the sum over matched values -- while an explicit union
+# `{redis|redcap}` still sums. Which value a multi-match doc is scored on is
+# unspecified, so (as in Group 15) these tests assert relationships against our
+# OWN exact-value scores rather than pinned Redis numbers. A text field gives
+# non-zero doc lengths so the tag terms score (a text-less index scores 0).
+#   cat dt: redis=4 (a,b,c,multi), redcap=2 (d,multi) -> distinct IDFs, so the
+#   representative pick on the multi-match doc is observable.
+INDEX_TPX = ScoringIndex(
+    "idxTPX",
+    ["FT.CREATE", "idxTPX", "ON", "HASH", "PREFIX", "1", "tpx:",
+     "SCHEMA", "body", "TEXT", "NOSTEM", "cat", "TAG", "rank", "NUMERIC"],
+    {
+        "tpx:a": {"body": "aa", "cat": "redis", "rank": "1"},
+        "tpx:b": {"body": "aa", "cat": "redis", "rank": "2"},
+        "tpx:c": {"body": "aa", "cat": "redis", "rank": "3"},
+        "tpx:d": {"body": "aa", "cat": "redcap", "rank": "4"},
+        "tpx:multi": {"body": "aa", "cat": "redis,redcap", "rank": "5"},
+        "tpx:green": {"body": "aa", "cat": "green", "rank": "6"},
+    },
+)
 
 # =====================================================================
 # Expected scores (verified against Redis 8.6; idxA unless noted)
@@ -899,3 +959,164 @@ class TestTextScoring(ValkeySearchTestCaseBase):
         # nearest first: hv:long (distance 0) then hv:short (distance 32).
         assert res[1] == b"hv:long" and res[2] == b"#0"
         assert res[4] == b"hv:short" and res[5] == b"#32"
+
+    # Group 15: prefix / suffix / fuzzy expansion scoring -------------------
+    #
+    # An expansion contributes ONE matched term's BM25, never the sum. We assert
+    # against our own exact-term scores rather than pinned Redis values, because
+    # our representative-term pick diverges from Redis on multi-match docs (see
+    # the INDEX_PSF note above and docs/redis_prefix_suffix_fuzzy_scoring.md §2).
+
+    # 15.1: a doc matching the prefix via a single term scores exactly like the
+    # exact-term query for that term (this case DOES agree with Redis).
+    def test_prefix_single_match_equals_exact_term(self):
+        client = self.server.get_new_client()
+        INDEX_PSF.load(client)
+        _, prefix = INDEX_PSF.search(client, "cat*")
+        _, exact = INDEX_PSF.search(client, "cat")
+        assert prefix["psf:cat"] > 0.0
+        assert prefix["psf:cat"] == pytest.approx(exact["psf:cat"],
+                                                  abs=SCORE_ABS_TOL)
+
+    # 15.2: a doc matching the prefix via SEVERAL terms is scored on exactly ONE
+    # of them (never their sum). Which term wins is unspecified/corpus-dependent,
+    # so assert only the invariant: == one exact-term score, and < their sum.
+    def test_prefix_multi_match_scores_one_term_not_sum(self):
+        client = self.server.get_new_client()
+        INDEX_PSF.load(client)
+        _, prefix = INDEX_PSF.search(client, "cat*")
+        _, category = INDEX_PSF.search(client, "category")
+        _, catalog = INDEX_PSF.search(client, "catalog")
+        got = prefix["psf:multi"]
+        cat_s = category["psf:multi"]
+        cat_l = catalog["psf:multi"]
+        # one matched term, not the sum
+        assert got < cat_s + cat_l - SCORE_ABS_TOL
+        assert (got == pytest.approx(cat_s, abs=SCORE_ABS_TOL)
+                or got == pytest.approx(cat_l, abs=SCORE_ABS_TOL)), (
+            f"prefix={got} category={cat_s} catalog={cat_l}")
+
+    # 15.3: suffix single-match scores like the exact term (needs WITHSUFFIXTRIE).
+    def test_suffix_single_match_equals_exact_term(self):
+        client = self.server.get_new_client()
+        INDEX_PSF.load(client)
+        _, suffix = INDEX_PSF.search(client, "@body:*ing")
+        _, exact = INDEX_PSF.search(client, "running")
+        assert suffix["psf:run"] > 0.0
+        assert suffix["psf:run"] == pytest.approx(exact["psf:run"],
+                                                  abs=SCORE_ABS_TOL)
+
+    # 15.4: fuzzy single-match scores like the exact term.
+    def test_fuzzy_single_match_equals_exact_term(self):
+        client = self.server.get_new_client()
+        INDEX_PSF.load(client)
+        _, fuzzy = INDEX_PSF.search(client, "%cat%")
+        _, exact = INDEX_PSF.search(client, "cat")
+        assert fuzzy["psf:cat"] > 0.0
+        assert fuzzy["psf:cat"] == pytest.approx(exact["psf:cat"],
+                                                 abs=SCORE_ABS_TOL)
+
+    # 15.5: a prefix combined with tag + numeric (text + numeric + tag) takes
+    # the EXTRA-STEP scoring path (numeric/tag/negate force it, unlike a
+    # pure-text query). "hell*" single-matches "hello", so the prefix leaf equals
+    # the exact "hello" leaf; text + tag sum to the Redis-verified
+    # "hello @cat:{a}" values (single-match agrees with Redis) and the numeric
+    # adds 0. Proves expansions are scored in combined queries, not dropped to 0.
+    def test_prefix_combined_with_tag_and_numeric_scored(self):
+        client = self.server.get_new_client()
+        INDEX_MIX.load(client)
+        keys, scores = INDEX_MIX.search(
+            client, "hell* @cat:{a} @rank:[0 100]")
+        # cat:{a} restricts to d:1, d:3; ranked by score (d:3 > d:1).
+        assert keys == ["d:3", "d:1"]
+        for key, expected in MIX_HELLO_AND_CAT_A_SCORES.items():
+            assert scores[key] == pytest.approx(expected, abs=SCORE_ABS_TOL)
+        # d:3 = prefix(hello) leaf + tag(a) leaf; numeric contributes 0.
+        assert scores["d:3"] == pytest.approx(
+            MIX_HELLO_SCORES["d:3"] + MIX_CAT_A_SCORES["d:3"],
+            abs=SCORE_ABS_TOL)
+
+    # 15.6: a suffix combined with tag + numeric (text + numeric + tag), on the
+    # extra-step path. "*llo" single-matches "hello" in every doc here, so the
+    # suffix leaf equals the exact "hello" leaf, and text + tag sum to the same
+    # Redis-verified values as "hello @cat:{a}"; the numeric adds 0.
+    def test_suffix_combined_with_tag_and_numeric_scored(self):
+        client = self.server.get_new_client()
+        INDEX_MIX.load(client)
+        keys, scores = INDEX_MIX.search(
+            client, "@body:*llo @cat:{a} @rank:[0 100]")
+        # cat:{a} restricts to d:1, d:3; ranked by score (d:3 > d:1).
+        assert keys == ["d:3", "d:1"]
+        for key, expected in MIX_HELLO_AND_CAT_A_SCORES.items():
+            assert scores[key] == pytest.approx(expected, abs=SCORE_ABS_TOL)
+        # d:3 = suffix(hello) leaf + tag(a) leaf; numeric contributes 0.
+        assert scores["d:3"] == pytest.approx(
+            MIX_HELLO_SCORES["d:3"] + MIX_CAT_A_SCORES["d:3"],
+            abs=SCORE_ABS_TOL)
+
+    # 15.7: a fuzzy pattern combined with tag + numeric (text + numeric + tag),
+    # on the extra-step path. "%helo%" (edit distance 1) single-matches "hello",
+    # so the fuzzy leaf equals the exact "hello" leaf and the combined scores
+    # match "hello @cat:{a}"; the numeric adds 0.
+    def test_fuzzy_combined_with_tag_and_numeric_scored(self):
+        client = self.server.get_new_client()
+        INDEX_MIX.load(client)
+        keys, scores = INDEX_MIX.search(
+            client, "@body:%helo% @cat:{a} @rank:[0 100]")
+        assert keys == ["d:3", "d:1"]
+        for key, expected in MIX_HELLO_AND_CAT_A_SCORES.items():
+            assert scores[key] == pytest.approx(expected, abs=SCORE_ABS_TOL)
+
+    # Group 16: tag prefix expansion scoring --------------------------------
+    #
+    # A tag prefix `@cat:{red*}` is scored like a text expansion: exactly ONE
+    # matched value's BM25 (F == 1, its own IDF), never the sum over matched
+    # values, while a union still sums. As in Group 15 we assert against our own
+    # exact-value scores, since the representative pick can diverge from Redis on
+    # a doc matching several values.
+
+    # 16.1: a doc whose only matching value is one tag scores exactly like the
+    # exact-value query for that value (this case agrees with Redis).
+    def test_tag_prefix_single_match_equals_exact_value(self):
+        client = self.server.get_new_client()
+        INDEX_TPX.load(client)
+        _, prefix = INDEX_TPX.search(client, "@cat:{red*}")
+        _, exact = INDEX_TPX.search(client, "@cat:{redis}")
+        assert prefix["tpx:a"] > 0.0
+        assert prefix["tpx:a"] == pytest.approx(exact["tpx:a"],
+                                                abs=SCORE_ABS_TOL)
+
+    # 16.2: a doc carrying SEVERAL values matching the prefix is scored on ONE of
+    # them, never their sum (redis dt=4, redcap dt=2 -> distinct IDFs, so the
+    # pick is observable). Assert only the invariant: == one exact-value score,
+    # and strictly below the union of both (which DOES sum).
+    def test_tag_prefix_multi_match_scores_one_value_not_sum(self):
+        client = self.server.get_new_client()
+        INDEX_TPX.load(client)
+        _, prefix = INDEX_TPX.search(client, "@cat:{red*}")
+        _, redis = INDEX_TPX.search(client, "@cat:{redis}")
+        _, redcap = INDEX_TPX.search(client, "@cat:{redcap}")
+        _, both = INDEX_TPX.search(client, "@cat:{redis|redcap}")
+        got = prefix["tpx:multi"]
+        redis_s = redis["tpx:multi"]
+        redcap_s = redcap["tpx:multi"]
+        # the union sums both matched values...
+        assert both["tpx:multi"] == pytest.approx(redis_s + redcap_s,
+                                                  abs=SCORE_ABS_TOL)
+        # ...but the prefix contributes exactly one.
+        assert got < both["tpx:multi"] - SCORE_ABS_TOL
+        assert (got == pytest.approx(redis_s, abs=SCORE_ABS_TOL)
+                or got == pytest.approx(redcap_s, abs=SCORE_ABS_TOL)), (
+            f"prefix={got} redis={redis_s} redcap={redcap_s}")
+
+    # 16.3: a tag prefix combined with a numeric clause is still scored (the
+    # numeric adds 0), so the combined score equals the prefix alone -- proving
+    # the tag expansion is not dropped to 0 on the combined-query path.
+    def test_tag_prefix_combined_with_numeric_scored(self):
+        client = self.server.get_new_client()
+        INDEX_TPX.load(client)
+        _, combined = INDEX_TPX.search(client, "@cat:{red*} @rank:[0 100]")
+        _, prefix_only = INDEX_TPX.search(client, "@cat:{red*}")
+        assert combined["tpx:a"] > 0.0
+        assert combined["tpx:a"] == pytest.approx(prefix_only["tpx:a"],
+                                                  abs=SCORE_ABS_TOL)

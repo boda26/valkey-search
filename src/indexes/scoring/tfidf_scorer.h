@@ -41,6 +41,9 @@ class TfidfScorer : public Scorer {
   // Scores one leaf given a precomputed IDF: leaf_weight * TF * IDF.
   float ScoreLeaf(const LeafScoreInput& input) const override;
 
+  // Standard TF-IDF scores a matched numeric leaf as weight 1 * frequency 1.
+  float ScoreNumericLeaf() const override { return 1.0f; }
+
   float ComposeDocumentScore(const DocumentScoreInput& input) const override;
 };
 

@@ -94,6 +94,9 @@ class Scorer {
   // 0 for a degenerate corpus (avg_doc_len <= 0).
   virtual float ScoreLeaf(const LeafScoreInput& input) const = 0;
 
+  // Score of a matched numeric range leaf; a constant, and $weight is ignored.
+  virtual float ScoreNumericLeaf() const = 0;
+
   // Folds the per-document signals into the final score.
   virtual float ComposeDocumentScore(const DocumentScoreInput& input) const = 0;
 };

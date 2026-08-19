@@ -50,6 +50,12 @@ TEST(TfidfScorerTest, IdentityNameAndType) {
   EXPECT_FALSE(scorer.NeedsDocumentLength());
 }
 
+// A matched numeric leaf scores weight 1 * frequency 1, with $weight ignored.
+TEST(TfidfScorerTest, ScoreNumericLeafIsOne) {
+  TfidfScorer scorer;
+  EXPECT_EQ(scorer.ScoreNumericLeaf(), 1.0f);
+}
+
 // IDF = floor(log2(1 + (N+1)/dt)); with N=8: hello (dt=6) -> 1, rare (dt=2) ->
 // 2, unique (dt=1) -> 3. leaf_weight and TF are both 1 here, so the leaf score
 // equals the IDF.
@@ -127,7 +133,7 @@ TEST(TfidfScorerTest, ComposePositiveInfinityShortCircuits) {
   EXPECT_EQ(scorer.ComposeDocumentScore({2.0f, kInf, /*norm=*/1}), kInf);
 }
 
-// Redis oracle: a single-term query ties at 1.0 because TF cancels norm.
+// A single-term query ties at 1.0 across matching docs because TF cancels norm.
 TEST(TfidfScorerTest, ComposeDividesByNorm) {
   TfidfScorer scorer;
   EXPECT_TRUE(scorer.NeedsNorm());

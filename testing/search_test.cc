@@ -1460,7 +1460,7 @@ class ScoreTextQueryTestBase : public ValkeySearchTest {
   // a numeric field "rating", so ScoreTextQuery sees real posting lists and a
   // non-zero corpus. Each doc is (key, text, color); an empty color leaves the
   // doc untracked by the tag index, and the numeric field needs no records
-  // (ScoreNode's numeric case returns 0 without touching the index).
+  // (ScoreNode's numeric case returns a constant without touching the index).
   std::shared_ptr<MockIndexSchema> BuildTextTagSchema(
       const std::vector<std::tuple<std::string, std::string, std::string>>
           &docs) {
@@ -1477,8 +1477,8 @@ class ScoreTextQueryTestBase : public ValkeySearchTest {
         CreateTagIndexProto(/*separator=*/",", /*case_sensitive=*/false));
     VMSDK_EXPECT_OK(schema->AddIndex("color", "color", tag));
     // A numeric field so text+numeric composition can be scored. ScoreNode's
-    // kNumeric case returns 0 without touching the index (the pre-filter admits
-    // range membership), so the numeric index needs no records for scoring.
+    // kNumeric case returns a constant without touching the index (the
+    // pre-filter admits range membership), so it needs no records for scoring.
     auto numeric =
         std::make_shared<indexes::Numeric>(CreateNumericIndexProto());
     VMSDK_EXPECT_OK(schema->AddIndex("rating", "rating", numeric));
@@ -1514,7 +1514,9 @@ class ScoreTextQueryTestBase : public ValkeySearchTest {
 
   // Score `key` against `filter`; nullopt when the predicate did not match.
   std::optional<float> Score(MockIndexSchema &schema, absl::string_view filter,
-                             const std::string &key) {
+                             const std::string &key,
+                             indexes::scoring::ScorerType scorer_type =
+                                 indexes::scoring::ScorerType::kBm25Std) {
     TextParsingOptions options{};
     auto parsed = FilterParser(schema, filter, options).Parse();
     EXPECT_TRUE(parsed.ok()) << parsed.status();
@@ -1522,10 +1524,8 @@ class ScoreTextQueryTestBase : public ValkeySearchTest {
     std::vector<indexes::BorrowedNeighbor> cands{
         {BorrowedInternedStringPtr(interned), 0.0f, 0.0f}};
     vmsdk::ReaderMutexLock lock(&schema.GetTimeSlicedMutex());
-    query::ScoreTextQuery(
-        schema, parsed.value().root_predicate.get(),
-        indexes::scoring::GetScorer(indexes::scoring::ScorerType::kBm25Std),
-        cands);
+    query::ScoreTextQuery(schema, parsed.value().root_predicate.get(),
+                          indexes::scoring::GetScorer(scorer_type), cands);
     if (cands.empty()) return std::nullopt;
     return cands[0].score;
   }
@@ -1640,7 +1640,8 @@ INSTANTIATE_TEST_SUITE_P(
          .filter = "@text:hello -@text:there",
          .expected = [](const auto &b) { return b[0]; }},
 
-        // --- Numeric: a filter, never a ranker (contributes 0) ---
+        // --- Numeric under BM25STD: a filter, never a ranker (contributes 0).
+        // TFIDF scores it 1.0; see NumericLeafScoreIsScorerDependent. ---
         // Adding a numeric clause to a text query changes nothing.
         {.test_name = "NumericClauseAddsZeroToText",
          .docs = {{"key1", "hello world", ""}},
@@ -1691,6 +1692,24 @@ INSTANTIATE_TEST_SUITE_P(
          .expected = [](const auto &b) { return b[0]; }},
     }),
     [](const TestParamInfo<ScoreCase> &info) { return info.param.test_name; });
+
+// A matched numeric range is a pure filter under BM25STD but a constant 1.0
+// leaf under TFIDF, summing with the text leaf. Doc "hello world" has norm 1,
+// so TFIDF's /norm is the identity here.
+TEST_F(ScoreTextQueryTestBase, NumericLeafScoreIsScorerDependent) {
+  using indexes::scoring::ScorerType;
+  auto schema = BuildTextTagSchema({{"key1", "hello world", ""}});
+  auto bm25 = Score(*schema, "@rating:[0 100]", "key1", ScorerType::kBm25Std);
+  auto tfidf = Score(*schema, "@rating:[0 100]", "key1", ScorerType::kTfidf);
+  ASSERT_TRUE(bm25.has_value() && tfidf.has_value());
+  EXPECT_EQ(*bm25, 0.0f);
+  EXPECT_NEAR(*tfidf, 1.0f, 1e-4f);
+  auto text = Score(*schema, "@text:hello", "key1", ScorerType::kTfidf);
+  auto both =
+      Score(*schema, "@text:hello @rating:[0 100]", "key1", ScorerType::kTfidf);
+  ASSERT_TRUE(text.has_value() && both.has_value());
+  EXPECT_NEAR(*both, *text + 1.0f, 1e-4f);
+}
 
 // --- Tag scoring: relationships not expressible as a same-key formula --------
 //

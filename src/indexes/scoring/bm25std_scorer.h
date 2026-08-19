@@ -45,6 +45,9 @@ class Bm25StdScorer : public Scorer {
   // in-iterator hot path (term.cc).
   float ScoreLeaf(const LeafScoreInput& input) const override;
 
+  // A numeric leaf carries no term signal, so standard BM25 scores it 0.
+  float ScoreNumericLeaf() const override { return 0.0f; }
+
   float ComposeDocumentScore(const DocumentScoreInput& input) const override;
 };
 

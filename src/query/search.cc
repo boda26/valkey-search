@@ -872,14 +872,13 @@ std::optional<float> ScoreNode(const Predicate *predicate,
                                           score_ctx.avg_doc_len,
                                           predicate->GetWeight()});
     }
-    // A numeric range match is a filter, never a ranker: it carries no IDF, no
-    // term frequency, and no doc-length component, so under BM25STD it
-    // contributes nothing (Redis reports "Irrelevant token -> score is 0").
-    // Returning 0 leaves ordering unchanged whether or not a numeric clause is
-    // present — a numeric candidate only reaches here because the pre-filter
-    // admitted it, so there is no nullopt (non-match) path.
+    // A numeric range match carries no IDF, term frequency, or doc-length
+    // component, so its score is a scorer-dependent constant with $weight
+    // ignored: 0 under BM25STD, 1.0 under TFIDF. A numeric candidate only
+    // reaches here because the pre-filter admitted it, so there is no nullopt
+    // (non-match) path.
     case PredicateType::kNumeric:
-      return 0.0f;
+      return score_ctx.scorer->ScoreNumericLeaf();
     // A tag value is scored as a BM25 term with F ≡ 1 (term frequency is not
     // counted): IDF over the per-tag-value document count, normalized by the
     // document's TEXT length, honoring $weight. A union (`{red|blue}`) sums the

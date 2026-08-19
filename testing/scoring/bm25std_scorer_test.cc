@@ -56,6 +56,12 @@ TEST(Bm25StdScorerTest, IdentityNameAndType) {
   EXPECT_EQ(scorer.Type(), ScorerType::kBm25Std);
 }
 
+// A numeric leaf is a pure filter under BM25STD.
+TEST(Bm25StdScorerTest, ScoreNumericLeafIsZero) {
+  Bm25StdScorer scorer;
+  EXPECT_EQ(scorer.ScoreNumericLeaf(), 0.0f);
+}
+
 TEST(Bm25StdScorerTest, ScoreLeafCorpusReference) {
   Bm25StdScorer scorer;
   LeafData leaf = test_data::LeafForHello(test_data::kDocs[4]);

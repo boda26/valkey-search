@@ -35,7 +35,7 @@ float TfidfScorer::ScoreLeaf(const LeafScoreInput& input) const {
 float TfidfScorer::ComposeDocumentScore(const DocumentScoreInput& input) const {
   // Negative document scores (including -inf) clamp to 0 under TFIDF.
   if (input.document_score < 0.0f) return 0.0f;
-  // A text-less document has norm 0; Redis scores it 0 rather than dividing.
+  // A text-less document has norm 0; score it 0 rather than dividing.
   if (input.norm == 0) return 0.0f;
   // Avoid 0 * inf -> NaN; propagate +inf as the final score.
   if (IsInf(input.document_score)) return input.document_score;

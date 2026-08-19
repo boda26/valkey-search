@@ -1476,9 +1476,10 @@ class ScoreTextQueryTestBase : public ValkeySearchTest {
     auto tag = std::make_shared<indexes::Tag>(
         CreateTagIndexProto(/*separator=*/",", /*case_sensitive=*/false));
     VMSDK_EXPECT_OK(schema->AddIndex("color", "color", tag));
-    // A numeric field so text+numeric composition can be scored. ScoreNode's
-    // kNumeric case returns a constant without touching the index (the
-    // pre-filter admits range membership), so it needs no records for scoring.
+    // A numeric field so text+numeric composition can be scored. ScoreNode
+    // re-checks range membership per document (an OR admits candidates through
+    // a sibling branch), so every doc gets a `rating` inside the [0 100] range
+    // the cases query with.
     auto numeric =
         std::make_shared<indexes::Numeric>(CreateNumericIndexProto());
     VMSDK_EXPECT_OK(schema->AddIndex("rating", "rating", numeric));
@@ -1489,6 +1490,7 @@ class ScoreTextQueryTestBase : public ValkeySearchTest {
       if (!color.empty()) {
         VMSDK_EXPECT_OK(tag->AddRecord(key, color));
       }
+      VMSDK_EXPECT_OK(numeric->AddRecord(key, "50"));
       schema->SetIndexMutationSequenceNumber(key, 0);
     }
     return schema;
@@ -1711,6 +1713,128 @@ TEST_F(ScoreTextQueryTestBase, NumericLeafScoreIsScorerDependent) {
   EXPECT_NEAR(*both, *text + 1.0f, 1e-4f);
 }
 
+// Being admitted does not mean every leaf matched: an OR admits a document
+// through one branch while a sibling numeric branch stays unsatisfied, so the
+// range has to be re-checked per document. Otherwise the unmatched numeric
+// branch leaks TFIDF's matched-leaf constant into the score (invisible under
+// BM25STD, whose numeric leaf is 0 either way). Docs carry rating 50.
+TEST_F(ScoreTextQueryTestBase, NumericLeafOutsideRangeContributesNothing) {
+  using indexes::scoring::ScorerType;
+  auto schema = BuildTextTagSchema({{"key1", "hello world", ""}});
+  auto text = Score(*schema, "@text:hello", "key1", ScorerType::kTfidf);
+  ASSERT_TRUE(text.has_value());
+  EXPECT_GT(*text, 0.0f);
+
+  // OR with an unsatisfied numeric branch scores the text leaf ALONE.
+  auto or_miss = Score(*schema, "@text:hello | @rating:[200 300]", "key1",
+                       ScorerType::kTfidf);
+  ASSERT_TRUE(or_miss.has_value());
+  EXPECT_NEAR(*or_miss, *text, 1e-4f);
+
+  // Control: a satisfied numeric branch does add the matched-leaf constant.
+  auto or_hit = Score(*schema, "@text:hello | @rating:[0 100]", "key1",
+                      ScorerType::kTfidf);
+  ASSERT_TRUE(or_hit.has_value());
+  EXPECT_NEAR(*or_hit, *text + 1.0f, 1e-4f);
+
+  // In an AND an unsatisfied range makes the whole document a non-match, which
+  // scores 0 while keeping the already-admitted candidate.
+  auto and_miss = Score(*schema, "@text:hello @rating:[200 300]", "key1",
+                        ScorerType::kTfidf);
+  ASSERT_TRUE(and_miss.has_value());
+  EXPECT_EQ(*and_miss, 0.0f);
+}
+
+// --- TFIDF slop: the positional spread of the query's terms ------------------
+//
+// All cases score the single doc "alpha beta gamma delta epsilon" (positions
+// alpha=0, beta=1, gamma=2, delta=3, epsilon=4). With one indexed document
+// every term has IDF floor(log2(1 + 2/1)) == 1 and TF 1, so each text leaf
+// contributes exactly 1.0, and norm (max term frequency) is 1. That leaves the
+// final score as `matched_leaves / slop`, so each expectation reads directly as
+// the slop the walk produced. Semantics: docs/tfidf_slop_valkey_search.md.
+
+// Flat AND: slop is floor(sqrt(sum of squared gaps)) between consecutive terms,
+// so the same two leaves score lower the further apart they sit. BM25STD has no
+// slop divisor and must stay flat across the same queries.
+TEST_F(ScoreTextQueryTestBase, TfidfSlopDividesByTermSpread) {
+  using indexes::scoring::ScorerType;
+  auto schema =
+      BuildTextTagSchema({{"d1", "alpha beta gamma delta epsilon", ""}});
+  auto tfidf = [&](absl::string_view filter) {
+    auto s = Score(*schema, filter, "d1", ScorerType::kTfidf);
+    EXPECT_TRUE(s.has_value()) << filter;
+    return s.value_or(0.0f);
+  };
+  // One anchor -> no gaps -> slop 1.
+  EXPECT_NEAR(tfidf("@text:alpha"), 1.0f, 1e-4f);
+  // Adjacent terms: gap 1 -> slop 1.
+  EXPECT_NEAR(tfidf("@text:alpha @text:beta"), 2.0f, 1e-4f);
+  // gap 2 -> slop 2.
+  EXPECT_NEAR(tfidf("@text:alpha @text:gamma"), 1.0f, 1e-4f);
+  // gap 4 -> slop 4.
+  EXPECT_NEAR(tfidf("@text:alpha @text:epsilon"), 0.5f, 1e-4f);
+  // gaps 2 and 2 -> floor(sqrt(8)) == 2, over three leaves.
+  EXPECT_NEAR(tfidf("@text:alpha @text:gamma @text:epsilon"), 1.5f, 1e-4f);
+
+  // BM25STD control: proximity does not move the score.
+  auto near_pair = Score(*schema, "@text:alpha @text:beta", "d1");
+  auto far_pair = Score(*schema, "@text:alpha @text:epsilon", "d1");
+  ASSERT_TRUE(near_pair && far_pair);
+  EXPECT_FLOAT_EQ(*near_pair, *far_pair);
+}
+
+// A nested group collapses to the union of its leaf positions and contributes a
+// single anchor, so gaps are measured to its CLOSEST member: alpha {0} against
+// {gamma 2, epsilon 4} is a gap of 2, not 4. All three leaves still sum.
+TEST_F(ScoreTextQueryTestBase, TfidfSlopCollapsesNestedGroupToOneAnchor) {
+  using indexes::scoring::ScorerType;
+  auto schema =
+      BuildTextTagSchema({{"d1", "alpha beta gamma delta epsilon", ""}});
+  auto score = Score(*schema, "@text:alpha (@text:gamma | @text:epsilon)", "d1",
+                     ScorerType::kTfidf);
+  ASSERT_TRUE(score.has_value());
+  EXPECT_NEAR(*score, 3.0f / 2.0f, 1e-4f);
+}
+
+// The ROOT group is unwrapped whatever its type: a flat OR's branches are the
+// outermost anchors, not one collapsed union. `alpha | epsilon` therefore pays
+// the full gap of 4 rather than the slop 1 a single anchor would give.
+TEST_F(ScoreTextQueryTestBase, TfidfSlopUnwrapsFlatOrRoot) {
+  using indexes::scoring::ScorerType;
+  auto schema =
+      BuildTextTagSchema({{"d1", "alpha beta gamma delta epsilon", ""}});
+  auto score =
+      Score(*schema, "@text:alpha | @text:epsilon", "d1", ScorerType::kTfidf);
+  ASSERT_TRUE(score.has_value());
+  EXPECT_NEAR(*score, 2.0f / 4.0f, 1e-4f);
+}
+
+// A repeated term yields two anchors over the same positions, so every gap is 0
+// and the slop falls back to the anchor count (2 - 1 == 1) instead of dividing.
+TEST_F(ScoreTextQueryTestBase, TfidfSlopZeroSumFallsBackToAnchorCount) {
+  using indexes::scoring::ScorerType;
+  auto schema =
+      BuildTextTagSchema({{"d1", "alpha beta gamma delta epsilon", ""}});
+  auto score =
+      Score(*schema, "@text:alpha @text:alpha", "d1", ScorerType::kTfidf);
+  ASSERT_TRUE(score.has_value());
+  EXPECT_NEAR(*score, 2.0f, 1e-4f);
+}
+
+// A prefix leaf is not resolved to posting lists (term expansion is unscored),
+// so it contributes neither a leaf score nor a slop anchor: the query scores as
+// the bare `alpha` term with slop 1.
+TEST_F(ScoreTextQueryTestBase, TfidfSlopSkipsUnscoredPrefixLeaf) {
+  using indexes::scoring::ScorerType;
+  auto schema =
+      BuildTextTagSchema({{"d1", "alpha beta gamma delta epsilon", ""}});
+  auto score =
+      Score(*schema, "@text:alpha @text:eps*", "d1", ScorerType::kTfidf);
+  ASSERT_TRUE(score.has_value());
+  EXPECT_NEAR(*score, 1.0f, 1e-4f);
+}
+
 // --- Tag scoring: relationships not expressible as a same-key formula --------
 //
 // The formula-shaped cases ($weight, union sum, text+tag sum, numeric adds 0)
@@ -1769,7 +1893,8 @@ TEST_F(ScoreTextQueryTestBase, ShorterTextBoostsTagTerm) {
 }
 
 // On a text-less index every doc has TEXT length 0, so avg_doc_len is 0 and the
-// scorer returns a well-defined 0 — NOT Redis's nan. The candidate is kept
+// scorer returns a well-defined 0 — NOT the reference implementation's nan.
+// The candidate is kept
 // (matched), just contributes nothing to relevance.
 TEST_F(ScoreTextQueryTestBase, TextLessIndexScoresZeroNotNan) {
   auto schema = BuildTagOnlySchema({{"d1", "red"}, {"d2", "blue"}});
@@ -1799,6 +1924,33 @@ TEST_F(ScoreTextQueryTestBase, RecomputePathMatchesExtraStepAtNonZero) {
 
   // Recompute path: SingleDocumentScorer takes the lock itself, so construct
   // and call it WITHOUT the reader lock held.
+  TextParsingOptions options{};
+  auto parsed = FilterParser(*schema, filter, options).Parse();
+  ASSERT_TRUE(parsed.ok()) << parsed.status();
+  query::SingleDocumentScorer document_scorer(
+      *schema, parsed.value().root_predicate.get(), scorer);
+  auto recomputed = document_scorer.Score(StringInternStore::Intern("d1"));
+  ASSERT_TRUE(recomputed.has_value());
+  EXPECT_FLOAT_EQ(*recomputed, *extra_step);
+}
+
+// Slop must be re-derived identically on the recompute path, or a document's
+// score would shift after a mutation. Uses a spread-out multi-term TFIDF query
+// so a missing (or differently walked) slop divisor shows up as a mismatch.
+TEST_F(ScoreTextQueryTestBase, RecomputePathMatchesExtraStepWithSlop) {
+  auto schema = BuildTextTagSchema({
+      {"d1", "alpha beta gamma delta epsilon", "red"},
+      {"d2", "alpha beta gamma delta zeta", "blue"},
+  });
+  const auto *scorer =
+      indexes::scoring::GetScorer(indexes::scoring::ScorerType::kTfidf);
+  const std::string filter = "@text:alpha @text:gamma @text:epsilon";
+
+  auto extra_step =
+      Score(*schema, filter, "d1", indexes::scoring::ScorerType::kTfidf);
+  ASSERT_TRUE(extra_step.has_value());
+  EXPECT_GT(*extra_step, 0.0f);
+
   TextParsingOptions options{};
   auto parsed = FilterParser(*schema, filter, options).Parse();
   ASSERT_TRUE(parsed.ok()) << parsed.status();

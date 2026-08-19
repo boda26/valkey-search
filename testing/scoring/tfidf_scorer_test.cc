@@ -153,6 +153,24 @@ TEST(TfidfScorerTest, ComposeZeroNormScoresZero) {
   EXPECT_EQ(scorer.ComposeDocumentScore({2.0f, kInf, /*norm=*/0}), 0.0f);
 }
 
+// A multi-term query is penalized by how far apart its terms sit in the doc.
+TEST(TfidfScorerTest, ComposeDividesBySlop) {
+  TfidfScorer scorer;
+  EXPECT_TRUE(scorer.NeedsSlop());
+  EXPECT_NEAR(scorer.ComposeDocumentScore({6.0f, 1.0f, /*norm=*/2, /*slop=*/3}),
+              1.0f, kFloatTolerance);
+  // Default slop leaves the score at the norm-only value.
+  EXPECT_NEAR(scorer.ComposeDocumentScore({6.0f, 1.0f, /*norm=*/2}), 3.0f,
+              kFloatTolerance);
+}
+
+// Slop is >= 1 by construction; a 0 from a miswired caller must not divide.
+TEST(TfidfScorerTest, ComposeZeroSlopClampsToOne) {
+  TfidfScorer scorer;
+  EXPECT_NEAR(scorer.ComposeDocumentScore({6.0f, 1.0f, /*norm=*/2, /*slop=*/0}),
+              3.0f, kFloatTolerance);
+}
+
 // Per-document ranking (score-desc / key-asc ordering, document_score
 // multiplier, AND/OR accumulation) is exercised end-to-end through the scoring
 // integration suite (integration/test_scoring.py), since it depends on the

@@ -147,6 +147,18 @@ TEST(Bm25StdScorerTest, ComposeIgnoresNorm) {
               kFloatTolerance);
 }
 
+// BM25 has no slop divisor, so the proximity of the query's terms is ignored
+// and callers skip the per-document position walk entirely.
+TEST(Bm25StdScorerTest, ComposeIgnoresSlop) {
+  Bm25StdScorer scorer;
+  EXPECT_FALSE(scorer.NeedsSlop());
+  const float expected = 0.5f * 0.7f;
+  EXPECT_NEAR(scorer.ComposeDocumentScore({0.5f, 0.7f, /*norm=*/0, /*slop=*/1}),
+              expected, kFloatTolerance);
+  EXPECT_NEAR(scorer.ComposeDocumentScore({0.5f, 0.7f, /*norm=*/0, /*slop=*/9}),
+              expected, kFloatTolerance);
+}
+
 // Per-document ranking (score-desc / key-asc ordering, document_score
 // multiplier, AND/OR accumulation) is exercised end-to-end through the scoring
 // integration suite (integration/test_scoring.py), since it depends on the

@@ -14,13 +14,11 @@
 
 namespace valkey_search::indexes::scoring {
 
-// TF-IDF scoring ("TFIDF"), RediSearch-compatible.
+// TF-IDF scoring ("TFIDF"), matching the industry-standard implementation.
 //
 //   IDF        = floor(log2(1 + (N + 1) / dt))
 //   tfidf_leaf = leaf_weight * TF * IDF
 //   final      = sum_of_leaves * document_score / norm / slop
-//
-// `slop` (proximity penalty) lands on a separate branch and is 1 here.
 class TfidfScorer : public Scorer {
  public:
   static constexpr std::string_view kName = "TFIDF";
@@ -34,6 +32,9 @@ class TfidfScorer : public Scorer {
 
   // Divides the document score by `norm`.
   bool NeedsNorm() const override { return true; }
+
+  // Divides the document score by the query's positional spread, `slop`.
+  bool NeedsSlop() const override { return true; }
 
   // IDF = floor(log2(1 + (N + 1) / dt)).
   float PrecomputeIDF(const IdfInput& input) const override;

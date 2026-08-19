@@ -15,7 +15,7 @@ from test_scoring import (
 Cluster-mode counterpart to test_scoring.py. Same data and queries, but the
 expected scores/order differ because BM25 statistics are computed per shard
 (each shard only sees the docs whose slot it owns). Baseline captured from a
-native Redis 8.6 3-shard cluster; see docs/test_scoring_cluster_reference.md.
+a native reference implementation 8.6 3-shard cluster; see docs/test_scoring_cluster_reference.md.
 
 Topology: ValkeySearchClusterTestCaseDebugMode default = 3 shards, 0 replicas.
 docA docs land as: shard0 {1,4,5,8}, shard1 {3,7}, shard2 {2,6}. docA:2 shares
@@ -44,7 +44,7 @@ CL_HELLO_WORLD_ORDER = ["docA:2", "docA:4", "docA:1", "docA:3", "docA:7"]
 # selects the two NEAREST by vector distance; the decoy hv:1 is farthest so it
 # is evicted -- even though its text score is the SMALLEST. This exercises the
 # cross-shard coordinator eviction: keying that merge on text score instead of
-# distance would wrongly keep the decoy. Verified against Redis 8.6 cluster.
+# distance would wrongly keep the decoy. Verified against the reference implementation 8.6 cluster.
 INDEX_HV_CL = ScoringIndex(
     "idxHVCL",
     ["FT.CREATE", "idxHVCL", "ON", "HASH", "PREFIX", "1", "hv:",
@@ -70,7 +70,7 @@ CL_HV_SCORES = {"hv:3": 0.452072, "hv:2": 0.395563}
 #   hv:{SA}3 vec(8,8) dist 98, body "cat cat"       text 0.18 -> shard-local evicts
 #   hv:{SB}1 vec(1,2) dist 1,  body "cat cat cat cat" high text -> kept
 # The decoy {SA}2 is nearer in text than {SB}1, so keying the merge on text
-# (the old bug) would keep {SA}1,{SA}2 and drop {SB}1. Verified vs Redis 8.6.
+# (the old bug) would keep {SA}1,{SA}2 and drop {SB}1. Verified vs the reference implementation 8.6.
 INDEX_HVK = ScoringIndex(
     "idxHVK",
     ["FT.CREATE", "idxHVK", "ON", "HASH", "PREFIX", "1", "hv:",
@@ -273,7 +273,7 @@ class TestTextScoringCluster(ValkeySearchClusterTestCase):
 
     def test_doc_wide_tf(self):
         self._load(INDEX_C)
-        keys, scores = self._search(INDEX_C, "redis")
+        keys, scores = self._search(INDEX_C, "engine")
         assert keys == ["docC:1", "docC:2"]
         assert scores["docC:1"] > scores["docC:2"]
         self._assert_scores(scores, {"docC:1": 0.452072, "docC:2": 0.287682})

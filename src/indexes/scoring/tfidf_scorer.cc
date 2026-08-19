@@ -7,7 +7,9 @@
 
 #include "src/indexes/scoring/tfidf_scorer.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 #include "absl/log/check.h"
 #include "src/indexes/scoring/scorer.h"
@@ -39,8 +41,10 @@ float TfidfScorer::ComposeDocumentScore(const DocumentScoreInput& input) const {
   if (input.norm == 0) return 0.0f;
   // Avoid 0 * inf -> NaN; propagate +inf as the final score.
   if (IsInf(input.document_score)) return input.document_score;
+  // Finalize() never yields 0, but clamp so no caller can divide by zero.
+  const float slop = static_cast<float>(std::max<uint32_t>(1, input.slop));
   return input.sum_of_terms * input.document_score /
-         static_cast<float>(input.norm);
+         static_cast<float>(input.norm) / slop;
 }
 
 }  // namespace valkey_search::indexes::scoring

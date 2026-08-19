@@ -36,8 +36,10 @@
 #include "src/indexes/index_base.h"
 #include "src/indexes/numeric.h"
 #include "src/indexes/scoring/scorer.h"
+#include "src/indexes/scoring/slop_calculator.h"
 #include "src/indexes/tag.h"
 #include "src/indexes/text.h"
+#include "src/indexes/text/flat_position_map.h"
 #include "src/indexes/text/orproximity.h"
 #include "src/indexes/text/posting.h"
 #include "src/indexes/text/proximity.h"
@@ -651,6 +653,11 @@ struct ResolvedLeaf {
   // Query-invariant per-term weight (BM25 IDF), computed once here instead of
   // per candidate document.
   float term_weight = 0.0f;
+  // The leaf's query field mask, used to keep the slop walk's positions on the
+  // fields the leaf actually searched: token positions restart per attribute
+  // but share one map, so position i of one field collides with position i of
+  // another. Never 0 for a text leaf (see SetupTextFieldConfiguration).
+  indexes::text::FieldMaskPredicate field_mask = 0;
 
   // --- Tag leaf (TagPredicate) ---
   // Null for text leaves. When set, `tag_values` holds one (query tag value,
@@ -661,6 +668,12 @@ struct ResolvedLeaf {
   // per-candidate ScoreNode walk needs only a cheap map lookup.
   const indexes::Tag *tag_index = nullptr;
   absl::InlinedVector<std::pair<std::string, float>, 4> tag_values;
+
+  // --- Numeric leaf (NumericPredicate) ---
+  // Null for other leaf types. Held so the per-document walk can re-check the
+  // range without a dynamic_cast: an OR admits documents through a sibling
+  // branch, so a numeric leaf is NOT guaranteed to match the candidate.
+  const NumericPredicate *numeric_pred = nullptr;
 };
 
 // Keyed on the base Predicate* (not TermPredicate*) so the per-document scoring
@@ -706,14 +719,16 @@ void ResolveLeaves(const Predicate *predicate, uint32_t total_docs,
       const auto &prefix = text_index->GetPrefix();
 
       ResolvedLeaf leaf;
+      leaf.field_mask = term_pred->GetFieldMask();
       // Collect the words the term matches on: the original word plus, for a
       // non-exact term on a stemmed field, every variant sharing its stem root
       // (matching TermPredicate::Evaluate). Ingestion stores original words in
       // the posting tree, so each word is resolved via FindPostingsTarget.
       auto add_word = [&](absl::string_view word) {
         auto postings = prefix.FindPostingsTarget(word);
-        // TODO: scoring for stemming. Redis treat stem variant as a leaf
-        // num_doc_contain_term is counted twice and need fix in future
+        // TODO: scoring for stemming. The reference implementation treats a
+        // stem variant as a leaf; num_doc_contain_term is counted twice and
+        // need fix in future
         if (postings) {
           leaf.num_doc_contain_term += postings->GetKeyCount();
           leaf.postings.push_back(std::move(postings));
@@ -782,6 +797,18 @@ void ResolveLeaves(const Predicate *predicate, uint32_t total_docs,
                                      scorer->PrecomputeIDF({total_docs, dt}));
       }
       resolved.emplace(tag_pred, std::move(leaf));
+      break;
+    }
+    case PredicateType::kNumeric: {
+      // Only a real NumericPredicate carries the index needed to re-check the
+      // range per document; a non-NumericPredicate kNumeric leaf (e.g. a test
+      // mock) stays unresolved and keeps the "already admitted" assumption.
+      auto numeric_pred = dynamic_cast<const NumericPredicate *>(predicate);
+      if (!numeric_pred || resolved.contains(numeric_pred)) break;
+      if (numeric_pred->GetIndex() == nullptr) break;
+      ResolvedLeaf leaf;
+      leaf.numeric_pred = numeric_pred;
+      resolved.emplace(numeric_pred, std::move(leaf));
       break;
     }
     default:
@@ -874,17 +901,35 @@ std::optional<float> ScoreNode(const Predicate *predicate,
     }
     // A numeric range match carries no IDF, term frequency, or doc-length
     // component, so its score is a scorer-dependent constant with $weight
-    // ignored: 0 under BM25STD, 1.0 under TFIDF. A numeric candidate only
-    // reaches here because the pre-filter admitted it, so there is no nullopt
-    // (non-match) path.
-    case PredicateType::kNumeric:
+    // ignored: 0 under BM25STD, 1.0 under TFIDF.
+    //
+    // The candidate having been admitted does NOT mean THIS leaf matched: an OR
+    // admits a document through a sibling branch, so the range is re-checked
+    // here and a document outside it is a non-match contributing nothing.
+    // (Under BM25STD the constant is 0, so the check only ever mattered for
+    // TFIDF.)
+    case PredicateType::kNumeric: {
+      auto it = score_ctx.resolved.find(predicate);
+      if (it == score_ctx.resolved.end() ||
+          it->second.numeric_pred == nullptr) {
+        return score_ctx.scorer->ScoreNumericLeaf();
+      }
+      const NumericPredicate *numeric_pred = it->second.numeric_pred;
+      if (!numeric_pred
+               ->Evaluate(
+                   numeric_pred->GetIndex()->GetValue(key.AsInternedRef()))
+               .matches) {
+        return std::nullopt;
+      }
       return score_ctx.scorer->ScoreNumericLeaf();
+    }
     // A tag value is scored as a BM25 term with F ≡ 1 (term frequency is not
     // counted): IDF over the per-tag-value document count, normalized by the
     // document's TEXT length, honoring $weight. A union (`{red|blue}`) sums the
     // terms for every matched value the document carries. Doc-length inputs
     // come from the index's TEXT field; on a text-less index avg_doc_len is 0
-    // and ScoreLeaf returns 0 (a well-defined score, not Redis's nan).
+    // and ScoreLeaf returns 0 (a well-defined score, not the reference
+    // implementation's nan).
     case PredicateType::kTag: {
       auto it = score_ctx.resolved.find(predicate);
       // A tag leaf is always resolved (unlike non-scored text predicates), but
@@ -922,6 +967,104 @@ std::optional<float> ScoreNode(const Predicate *predicate,
   return 0.0f;
 }
 
+// Slop is the positional spread of the query's terms within a document, and
+// divides the final TFIDF score. It depends on both the query tree's shape and
+// where each term sits in the document, so it is derived per candidate; this
+// holds the query-invariant part (the enable decision) plus the buffers reused
+// across candidates, leaving each scoring path a one-line Of() call.
+//
+// Construct once per query, then call Of() per document. Safe to construct for
+// a scorer that does not use slop, or before ResolveLeaves has run: both leave
+// it disabled, and Of() returns 1 without walking.
+class DocumentSlop {
+ public:
+  DocumentSlop(const Predicate *root, const ResolvedLeaves &resolved,
+               bool scorer_needs_slop)
+      : root_(root),
+        resolved_(resolved),
+        enabled_(scorer_needs_slop && root != nullptr &&
+                 CanExceedOne(resolved)) {}
+
+  uint32_t Of(BorrowedInternedStringPtr key) {
+    if (!enabled_) return 1;
+    calc_.Reset();
+    Walk(root_, key, /*is_root=*/true);
+    return calc_.Finalize();
+  }
+
+ private:
+  // Measuring a gap takes two anchors, and a text leaf yields at most one, so
+  // fewer than two of them pins slop at 1 for every document and the walk can
+  // be skipped outright. That covers a single term, a term plus tag/numeric
+  // filters, match-all, non-text queries, and unscored expansions (prefix/
+  // suffix/fuzzy never resolve). A leaf with no posting lists is absent from
+  // the whole corpus, so it cannot anchor either.
+  static bool CanExceedOne(const ResolvedLeaves &resolved) {
+    size_t text_leaves = 0;
+    for (const auto &[predicate, leaf] : resolved) {
+      if (!leaf.postings.empty() && ++text_leaves == 2) return true;
+    }
+    return false;
+  }
+
+  // Walks one node. A nested group collapses to the union of its leaves'
+  // positions and contributes a single anchor to its parent level, but the ROOT
+  // group is unwrapped: its children ARE the outermost level. Only text leaves
+  // carry positions, so tag, numeric and negation leaves contribute nothing.
+  void Walk(const Predicate *predicate, BorrowedInternedStringPtr key,
+            bool is_root) {
+    CHECK(predicate != nullptr);
+    switch (predicate->GetType()) {
+      case PredicateType::kComposedAnd:
+      case PredicateType::kComposedOr: {
+        auto composed = static_cast<const ComposedPredicate *>(predicate);
+        if (!is_root) calc_.EnterGroup();
+        for (const auto &child : composed->GetChildren()) {
+          Walk(child.get(), key, /*is_root=*/false);
+        }
+        if (!is_root) calc_.ExitGroup();
+        break;
+      }
+      case PredicateType::kText: {
+        // A miss is a non-scored text predicate (prefix/suffix/fuzzy): it holds
+        // no resolved posting lists, so it contributes no anchor.
+        auto it = resolved_.find(predicate);
+        if (it == resolved_.end()) break;
+        CollectPositions(it->second, key);
+        calc_.OnTerm(scratch_);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  // Gathers into `scratch_` every position the document occupies for one text
+  // leaf, unioned across the leaf's posting lists (a term and its stem variants
+  // are one node) and restricted to the fields the leaf searched.
+  void CollectPositions(const ResolvedLeaf &leaf,
+                        BorrowedInternedStringPtr key) {
+    scratch_.clear();
+    for (const auto &postings : leaf.postings) {
+      auto entry = postings->LookupKey(key);
+      if (!entry || entry->map == nullptr) continue;
+      indexes::text::PositionIterator pos_iter(*entry->map);
+      while (pos_iter.IsValid()) {
+        if (pos_iter.GetFieldMask() & leaf.field_mask) {
+          scratch_.push_back(pos_iter.GetPosition());
+        }
+        pos_iter.NextPosition();
+      }
+    }
+  }
+
+  const Predicate *const root_;
+  const ResolvedLeaves &resolved_;
+  const bool enabled_;
+  indexes::scoring::SlopCalculator calc_;
+  std::vector<indexes::scoring::SlopPosition> scratch_;
+};
+
 void ScoreTextQuery(const IndexSchema &index_schema,
                     const Predicate *root_predicate,
                     const indexes::scoring::Scorer *scorer,
@@ -947,6 +1090,7 @@ void ScoreTextQuery(const IndexSchema &index_schema,
 
   const bool needs_doc_len = scorer->NeedsDocumentLength();
   const bool needs_norm = scorer->NeedsNorm();
+  DocumentSlop slop(root_predicate, resolved, scorer->NeedsSlop());
   const uint64_t total_doc_len =
       needs_doc_len ? index_schema.GetTotalDocumentLength() : 0;
   const float avg_doc_len =
@@ -973,7 +1117,8 @@ void ScoreTextQuery(const IndexSchema &index_schema,
     if (root_predicate != nullptr) {
       score = ScoreNode(root_predicate, key, score_ctx);
     } else {
-      // Match-all (`*`): Redis scores the wildcard as a single BM25 leaf with a
+      // Match-all (`*`): the reference implementation scores the wildcard as a
+      // single BM25 leaf with a
       // constant IDF (1.0) and term frequency (1), normalized by the document's
       // text length. On a text-less index avg_doc_len is 0 and ScoreLeaf
       // returns a well-defined 0.
@@ -988,8 +1133,8 @@ void ScoreTextQuery(const IndexSchema &index_schema,
                                      ? index_schema.GetDocumentScore(key)
                                      : score_ctx.default_document_score;
     const uint32_t norm = needs_norm ? index_schema.GetDocumentNorm(key) : 0;
-    const float final_score =
-        scorer->ComposeDocumentScore({resolved_score, document_score, norm});
+    const float final_score = scorer->ComposeDocumentScore(
+        {resolved_score, document_score, norm, slop.Of(key)});
     scored.push_back({candidate.key, 0.0f, final_score});
   }
 
@@ -1001,7 +1146,8 @@ void ScoreTextQuery(const IndexSchema &index_schema,
 // ScoreTextQuery via a thin BorrowedNeighbor adapter: KNN preserves neighbor
 // order, so the scores map back by index. Neighbor.distance is left untouched
 // (still reported via the score_as field); only Neighbor.score is set to the
-// text relevance, mirroring Redis WITHSCORES. Pure vector queries and vector
+// text relevance, mirroring the reference implementation's WITHSCORES. Pure
+// vector queries and vector
 // queries filtered only by numeric/tag predicates keep the KNN distance as
 // their score.
 void ApplyHybridTextScore(const SearchParameters &parameters,
@@ -1116,7 +1262,10 @@ std::optional<float> SingleDocumentScorer::Score(
   const uint32_t norm = state_->needs_norm
                             ? state_->index_schema.GetDocumentNorm(borrowed_key)
                             : 0;
-  return state_->scorer->ComposeDocumentScore({*sum, document_score, norm});
+  DocumentSlop slop(state_->root_predicate, state_->resolved,
+                    state_->scorer->NeedsSlop());
+  return state_->scorer->ComposeDocumentScore(
+      {*sum, document_score, norm, slop.Of(borrowed_key)});
 }
 
 absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
@@ -1127,6 +1276,7 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
 
   const auto *scorer = indexes::scoring::GetScorer(parameters.scorer);
   const bool needs_norm = scorer->NeedsNorm();
+  const bool needs_slop = scorer->NeedsSlop();
 
   // In-iterator scoring captures only the text iterator's score/weight, so it
   // is valid solely for genuinely pure-text queries. Any query that also
@@ -1157,6 +1307,22 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
         parameters, parameters.filter_parse_results.root_predicate.get(),
         entries_fetchers, false);
   }
+
+  // In-iterator scoring reads the leaf score straight off the text iterator,
+  // but slop needs each term's positions in the emitted document, which only
+  // the predicate tree can locate. Resolve the leaves once up front (the same
+  // snapshot ScoreTextQuery builds) so the per-document walk below is a lookup.
+  const Predicate *const root_predicate =
+      parameters.filter_parse_results.root_predicate.get();
+  ResolvedLeaves slop_leaves;
+  if (iterator_scoring_enabled && scorer->NeedsSlop() &&
+      root_predicate != nullptr && index_schema->GetIndexKeyInfoSize() > 0) {
+    ResolveLeaves(root_predicate, index_schema->GetIndexKeyInfoSize(), scorer,
+                  slop_leaves);
+  }
+  // Left empty above (extra-step query, or a scorer with no slop) means
+  // disabled, so this is safe to build unconditionally.
+  DocumentSlop slop(root_predicate, slop_leaves, scorer->NeedsSlop());
 
   // Get the config for maximum number of keys to accumulate before content
   // fetching
@@ -1215,7 +1381,8 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
             const BorrowedInternedStringPtr borrowed_key(key);
             borrowed.back().score = scorer->ComposeDocumentScore(
                 {raw, index_schema->GetDocumentScore(borrowed_key),
-                 needs_norm ? index_schema->GetDocumentNorm(borrowed_key) : 0});
+                 needs_norm ? index_schema->GetDocumentNorm(borrowed_key) : 0,
+                 slop.Of(borrowed_key)});
           }
         }
         iterator->Next();
@@ -1376,7 +1543,8 @@ void SearchResult::TrimResults(std::vector<T> &vec,
     //     from the fanout heap ascending and never sorted.
     //   - Hybrid `text=>[KNN]`: KNN produces neighbors ordered by distance, but
     //     the query score is the text relevance (set by ApplyHybridTextScore),
-    //     so re-rank by it to match Redis. The vector distance is preserved on
+    //     so re-rank by it to match the reference implementation. The vector
+    //     distance is preserved on
     //     Neighbor.distance and still reported via the score_as field.
     // Content resolution later drops some neighbors, but drops preserve
     // relative order, so this ordering survives. Pure vector queries (no text

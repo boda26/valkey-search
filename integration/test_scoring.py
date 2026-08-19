@@ -15,7 +15,7 @@ def _vec(*floats):
 """
 End-to-end tests for BM25STD scoring through FT.SEARCH ... WITHSCORES.
 
-Scores are verified against the Redis 8.6 docker baseline. All indexes use NOSTEM
+Scores are verified against the reference implementation (8.6) docker baseline. All indexes use NOSTEM
 so query terms match raw tokens and the verified score table applies directly.
 
 WITHSCORES reply layout: [count, key, score_str, attrs, key, score_str, ...]
@@ -127,16 +127,16 @@ INDEX_BDEF = ScoringIndex(
 )
 
 # idxC: three text fields. TF is counted document-wide, not per-field, so
-# docC:1 ("redis" in all three fields, TF=3) must outscore docC:2 (TF=1) on the
-# term "redis" -- whether the query is field-scoped (@f1:redis) or unscoped.
+# docC:1 ("engine" in all three fields, TF=3) must outscore docC:2 (TF=1) on
+# the term "engine" -- whether the query is field-scoped (@f1:engine) or not.
 INDEX_C = ScoringIndex(
     "idxC",
     ["FT.CREATE", "idxC", "ON", "HASH", "PREFIX", "1", "docC:",
      "SCHEMA", "f1", "TEXT", "NOSTEM", "f2", "TEXT", "NOSTEM",
      "f3", "TEXT", "NOSTEM"],
     {
-        "docC:1": {"f1": "redis", "f2": "redis stack", "f3": "redis valkey"},
-        "docC:2": {"f1": "redis", "f2": "other", "f3": "words"},
+        "docC:1": {"f1": "engine", "f2": "engine stack", "f3": "engine valkey"},
+        "docC:2": {"f1": "engine", "f2": "other", "f3": "words"},
     },
 )
 
@@ -146,7 +146,7 @@ INDEX_C = ScoringIndex(
 #
 # BM25's index size N must be ALL indexed docs, not just text-bearing ones. N
 # feeds both IDF and avg_doc_len, so scores computed with the wrong N=4 diverge
-# sharply from the correct N=10. Verified against Redis 8.6: FT.INFO
+# sharply from the correct N=10. Verified against the reference implementation (8.6): FT.INFO
 # num_docs=10 and EXPLAINSCORE uses N=10.
 _DMIX_TEXT = {
     "d:1": {"body": "hello world", "cat": "a,b"},
@@ -168,7 +168,7 @@ INDEX_MIX = ScoringIndex(
 # N=4 (text docs only) these would be ~0.303 / ~0.203 instead.
 MIX_HELLO_SCORES = {"d:3": 0.974311, "d:1": 0.650739, "d:2": 0.650739}
 
-# --- idxMix tag / numeric scores (verified against Redis 8.6) ---------------
+# --- idxMix tag / numeric scores (verified against the reference implementation 8.6) ---------------
 # A tag value is a BM25 term with F == 1, IDF over the per-tag-value document
 # count (dt), normalized by the document's TEXT length. N=10, avg_doc_len=0.70.
 #   cat dt: a=2 (d:1,d:3), b=2 (d:1,d:2), c=1 (d:4), x=6 (d:5..10).
@@ -187,7 +187,7 @@ MIX_HELLO_AND_CAT_A_SCORES = {"d:3": 2.234903, "d:1": 1.492684}
 # idxNumOnly / idxTagOnly: indexes with NO text field. BM25 doc-length
 # normalization needs a TEXT field (avg_doc_len derives from it); without one
 # avg_doc_len is 0. Numeric never ranks, and a tag term with avg_doc_len 0
-# scores a well-defined 0 (our implementation returns 0 here rather than Redis's
+# scores a well-defined 0 (our implementation returns 0 here rather than the reference implementation's
 # nan). So every matching doc scores 0 on either index.
 INDEX_NUM_ONLY = ScoringIndex(
     "idxNumOnly",
@@ -236,12 +236,44 @@ INDEX_HV = ScoringIndex(
                     "vec": _vec(1.0, 1.0)},
     },
 )
-# Hybrid text scores (verified against Redis 8.6). __vec_score (distance): 32 for
+# Hybrid text scores (verified against the reference implementation 8.6). __vec_score (distance): 32 for
 # hv:short, 0 for hv:long.
 HV_HYBRID_SCORES = {"hv:short": 0.267405, "hv:long": 0.138313}
 
+# idxSlop: the only index here whose TFIDF slop is ever != 1. Both docs have the
+# SAME length and the SAME term set and differ only in where `gamma` sits, so
+# BM25STD scores them identically and slop is the sole discriminator:
+#   dsl:1 "alpha gamma aa bb cc" -> alpha 0, gamma 1 -> gap 1 -> slop 1
+#   dsl:2 "alpha aa bb cc gamma" -> alpha 0, gamma 4 -> gap 4 -> slop 4
+# N=2 and dt(alpha)=dt(gamma)=2, so IDF is floor(log2(1 + 3/2)) = 1, and norm
+# (max term frequency) is 1. Each text leaf therefore contributes exactly 1.0
+# and a TFIDF score reads directly as matched_leaves / slop.
+INDEX_SLOP = ScoringIndex(
+    "idxSlop",
+    ["FT.CREATE", "idxSlop", "ON", "HASH", "PREFIX", "1", "dsl:",
+     "SCHEMA", "body", "TEXT", "NOSTEM", "cat", "TAG"],
+    {
+        "dsl:1": {"body": "alpha gamma aa bb cc", "cat": "z"},
+        "dsl:2": {"body": "alpha aa bb cc gamma", "cat": "z"},
+    },
+)
+
+# idxSlopNoOff: the same bodies on a NOOFFSETS index. Without offsets every
+# token is stored at position 0, so every gap is 0 and slop degrades to
+# (outermost anchors - 1) -- 1, 1, 2, 3 for 1..4 terms. Both docs then score
+# identically however their terms are spaced, which is the point.
+INDEX_SLOP_NOOFF = ScoringIndex(
+    "idxSlopNoOff",
+    ["FT.CREATE", "idxSlopNoOff", "ON", "HASH", "PREFIX", "1", "dno:",
+     "NOOFFSETS", "SCHEMA", "body", "TEXT", "NOSTEM"],
+    {
+        "dno:1": {"body": "alpha gamma aa bb cc"},
+        "dno:2": {"body": "alpha aa bb cc gamma"},
+    },
+)
+
 # =====================================================================
-# Expected scores (verified against Redis 8.6; idxA unless noted)
+# Expected scores (verified against the reference implementation 8.6; idxA unless noted)
 # =====================================================================
 
 # --- Group 1: single-term ---
@@ -250,7 +282,7 @@ HELLO_SCORES = {
     "docA:2": 0.430172, "docA:7": 0.430172, "docA:1": 0.331888,
 }
 RARE_SCORES = {"docA:8": 1.915183, "docA:6": 1.419164}
-# NOSTEM: no stem-root inflation. Redis's stemmed value would be 3.970230.
+# NOSTEM: no stem-root inflation. the reference implementation's stemmed value would be 3.970230.
 UNIQUE_SCORE = 1.985115
 
 # --- Group 2: AND / OR ---
@@ -307,6 +339,109 @@ MATCH_ALL_A_SCORES = {
     "docA:3": 0.880000, "docA:4": 0.773869,
 }
 
+
+# =====================================================================
+# TFIDF expected scores (verified against the reference implementation 8.6.3)
+# =====================================================================
+#
+# Sourced by running every case below against both engines and reading the reference implementation's
+# `/ slop N` divisor out of EXPLAINSCORE, so each expectation is pinned two ways
+# at once:
+#
+#   1. ref_final * ref_slop -- the reference implementation's IDF/TF/norm math with slop factored
+#      out. This matched OUR pre-slop math on 100% of the cases, which is what
+#      makes the table a parity check and not just a snapshot of our output.
+#   2. our final score, slop included.
+#
+# Each entry is therefore (ref_pre_slop, our_slop), and the expected final
+# score is DERIVED as ref_pre_slop / our_slop rather than stored -- so the
+# table cannot quietly drift into asserting whatever we currently output.
+#
+# our_slop is 1 for every case in the original corpus (its query terms are
+# adjacent, so floor(sqrt(sum of squared gaps)) == 1); idxSlop/idxSlopNoOff are
+# the 14 rows that exercise slop != 1, and there our slop agrees with the reference implementation's own
+# `/ slop N` too, including the 3-anchor cases. Only the two rows commented
+# "Ours vs reference slop differs" diverge. The reference implementation's slop rule is NOT fully
+# characterized (it is not a pure function of the gap sequence), so we score in
+# query order per docs/tfidf_slop_valkey_search.md.
+#
+# (index, query, extra_args, {key: (ref_pre_slop, our_slop)})
+TFIDF_CASES = [
+    (INDEX_A, [
+        ('hello', [], {"docA:1": (1, 1), "docA:2": (1, 1), "docA:3": (1, 1), "docA:4": (1, 1), "docA:5": (1, 1), "docA:7": (1, 1)}),
+        ('rare', [], {"docA:6": (2, 1), "docA:8": (2, 1)}),
+        ('unique', [], {"docA:6": (3, 1)}),
+        ('hello world', [], {"docA:1": (2, 1), "docA:2": (1.5, 1), "docA:3": (1.333333, 1), "docA:4": (1.2, 1), "docA:7": (1.5, 1)}),
+        ('hello | world', [], {"docA:1": (2, 1), "docA:2": (1.5, 1), "docA:3": (1.333333, 1), "docA:4": (1.2, 1), "docA:5": (1, 1), "docA:6": (1, 1), "docA:7": (1.5, 1)}),
+        ('(hello world) | rare', [], {"docA:1": (2, 1), "docA:2": (1.5, 1), "docA:3": (1.333333, 1), "docA:4": (1.2, 1), "docA:6": (2, 1), "docA:7": (1.5, 1), "docA:8": (2, 1)}),
+        ('hello (world | rare)', [], {"docA:1": (2, 1), "docA:2": (1.5, 1), "docA:3": (1.333333, 1), "docA:4": (1.2, 1), "docA:7": (1.5, 1)}),
+        # Ours vs reference slop differs: docA:1 reference slop 2; docA:2 reference slop 2; docA:3 reference slop 2; docA:4 reference slop 2; docA:7 reference slop 2.
+        ('hello world one', [], {"docA:1": (3, 1), "docA:2": (2, 1), "docA:3": (1.666667, 1), "docA:4": (1.4, 1), "docA:7": (2, 1)}),
+        ('(hello world) | (rare unique)', [], {"docA:1": (2, 1), "docA:2": (1.5, 1), "docA:3": (1.333333, 1), "docA:4": (1.2, 1), "docA:6": (5, 1), "docA:7": (1.5, 1)}),
+        ('hello hello', [], {"docA:1": (2, 1), "docA:2": (2, 1), "docA:3": (2, 1), "docA:4": (2, 1), "docA:5": (2, 1), "docA:7": (2, 1)}),
+        ('(hello)=>{$weight:5}', [], {"docA:1": (5, 1), "docA:2": (5, 1), "docA:3": (5, 1), "docA:4": (5, 1), "docA:5": (5, 1), "docA:7": (5, 1)}),
+        ('((hello)=>{$weight:4} (world)=>{$weight:3})=>{$weight:2}', [], {"docA:1": (14, 1), "docA:2": (11, 1), "docA:3": (10, 1), "docA:4": (9.2, 1), "docA:7": (11, 1)}),
+        ('((hello)=>{$weight:4} | (rare)=>{$weight:2})=>{$weight:3}', [], {"docA:1": (12, 1), "docA:2": (12, 1), "docA:3": (12, 1), "docA:4": (12, 1), "docA:5": (12, 1), "docA:6": (12, 1), "docA:7": (12, 1), "docA:8": (12, 1)}),
+        ('@body:"hello world"', [], {"docA:1": (2, 1), "docA:2": (1.5, 1), "docA:3": (1.333333, 1), "docA:4": (1.2, 1), "docA:7": (1.5, 1)}),
+        ('*', [], {"docA:1": (1, 1), "docA:2": (0.5, 1), "docA:3": (0.333333, 1), "docA:4": (0.2, 1), "docA:5": (0.25, 1), "docA:6": (1, 1), "docA:7": (0.5, 1), "docA:8": (1, 1)}),
+    ]),
+    (INDEX_A7, [
+        ('hello', ["SORTBY", "rank", "ASC"], {"docA:1": (1, 1), "docA:2": (1, 1), "docA:3": (1, 1), "docA:4": (1, 1), "docA:5": (1, 1), "docA:7": (1, 1)}),
+        ('hello', ["SORTBY", "rank", "DESC"], {"docA:1": (1, 1), "docA:2": (1, 1), "docA:3": (1, 1), "docA:4": (1, 1), "docA:5": (1, 1), "docA:7": (1, 1)}),
+    ]),
+    (INDEX_B, [
+        ('hello world', [], {"docB:1": (4, 1), "docB:2": (2, 1), "docB:3": (1, 1), "docB:4": (0, 1), "docB:5": (float("inf"), 1), "docB:6": (0, 1)}),
+    ]),
+    (INDEX_BDEF, [
+        ('hello world', [], {"docBd:1": (1, 1), "docBd:2": (1, 1), "docBd:3": (1, 1), "docBd:4": (1, 1), "docBd:5": (1, 1), "docBd:6": (1, 1)}),
+    ]),
+    (INDEX_C, [
+        ('@f1:engine', [], {"docC:1": (1, 1), "docC:2": (1, 1)}),
+        ('engine', [], {"docC:1": (1, 1), "docC:2": (1, 1)}),
+    ]),
+    (INDEX_MIX, [
+        ('hello', [], {"d:1": (2, 1), "d:2": (2, 1), "d:3": (2, 1)}),
+        ('hello | @rank:[5 5]', [], {"d:1": (2, 1), "d:2": (2, 1), "d:3": (2, 1), "d:5": (0, 1)}),
+        ('@rank:[0 100]', [], {"d:1": (1, 1), "d:10": (0, 1), "d:2": (1, 1), "d:3": (1, 1), "d:4": (1, 1), "d:5": (0, 1), "d:6": (0, 1), "d:7": (0, 1), "d:8": (0, 1), "d:9": (0, 1)}),
+        ('@cat:{a}', [], {"d:1": (2, 1), "d:3": (2, 1)}),
+        ('@cat:{c}', [], {"d:4": (3, 1)}),
+        ('@cat:{x}', [], {"d:10": (0, 1), "d:5": (0, 1), "d:6": (0, 1), "d:7": (0, 1), "d:8": (0, 1), "d:9": (0, 1)}),
+        ('@cat:{a|b}', [], {"d:1": (4, 1), "d:2": (2, 1), "d:3": (2, 1)}),
+        ('(@cat:{a})=>{$weight:3}', [], {"d:1": (6, 1), "d:3": (6, 1)}),
+        ('hello @cat:{a}', [], {"d:1": (4, 1), "d:3": (4, 1)}),
+        # Ours vs reference slop differs: d:1 reference slop 2; d:3 reference slop 2.
+        ('hello @cat:{a} @rank:[0 100]', [], {"d:1": (5, 1), "d:3": (5, 1)}),
+    ]),
+    (INDEX_NUM_ONLY, [
+        ('@rank:[1 4]', [], {"n:1": (0, 1), "n:2": (0, 1), "n:3": (0, 1), "n:4": (0, 1)}),
+    ]),
+    (INDEX_TAG_ONLY, [
+        ('@cat:{red}', [], {"t:1": (0, 1), "t:2": (0, 1)}),
+    ]),
+    (INDEX_NUM_TAG, [
+        ('@cat:{red}', [], {"nt:1": (0, 1), "nt:2": (0, 1), "nt:4": (0, 1)}),
+        ('@rank:[1 5]', [], {"nt:1": (0, 1), "nt:2": (0, 1), "nt:3": (0, 1), "nt:4": (0, 1), "nt:5": (0, 1)}),
+    ]),
+    (INDEX_HV, [
+        ('cat=>[KNN 2 @vec $q]', ["PARAMS", "2", "q", _vec(1.0, 1.0), "DIALECT", "2"], {"hv:long": (1, 1), "hv:short": (1, 1)}),
+    ]),
+    (INDEX_SLOP, [
+        ('alpha', [], {"dsl:1": (1, 1), "dsl:2": (1, 1)}),
+        ('alpha gamma', [], {"dsl:1": (2, 1), "dsl:2": (2, 4)}),
+        ('alpha cc', [], {"dsl:1": (2, 4), "dsl:2": (2, 3)}),
+        ('alpha bb cc', [], {"dsl:1": (3, 3), "dsl:2": (3, 2)}),
+        ('alpha (gamma | bb)', [], {"dsl:1": (3, 1), "dsl:2": (3, 2)}),
+        ('alpha alpha', [], {"dsl:1": (2, 1), "dsl:2": (2, 1)}),
+        ('alpha cc @cat:{z}', [], {"dsl:1": (3, 4), "dsl:2": (3, 3)}),
+        ('alpha bb cc @cat:{z}', [], {"dsl:1": (4, 3), "dsl:2": (4, 2)}),
+    ]),
+    (INDEX_SLOP_NOOFF, [
+        ('alpha', [], {"dno:1": (1, 1), "dno:2": (1, 1)}),
+        ('alpha gamma', [], {"dno:1": (2, 1), "dno:2": (2, 1)}),
+        ('alpha bb cc', [], {"dno:1": (3, 2), "dno:2": (3, 2)}),
+        ('alpha bb cc gamma', [], {"dno:1": (4, 3), "dno:2": (4, 3)}),
+    ]),
+]
 
 class TestTextScoring(ValkeySearchTestCaseBase):
 
@@ -569,19 +704,19 @@ class TestTextScoring(ValkeySearchTestCaseBase):
 
         assert scores["docB:5"] == float("inf")
         assert keys[0] == "docB:5"
-        # -inf is accepted and returned (diverges from Redis, which excludes it).
+        # -inf is accepted and returned (diverges from the reference implementation, which excludes it).
         assert scores["docB:6"] == float("-inf")
         assert keys[-1] == "docB:6"
 
     # Group 5: document-wide TF across fields ------------------------------
 
-    # 5.1: a field-scoped query (@f1:redis) still uses the document-wide term
-    # frequency. docC:1 has "redis" in all three fields (TF=3) and outscores
-    # docC:2 (TF=1), even though both match @f1:redis with one f1 occurrence.
+    # 5.1: a field-scoped query (@f1:engine) still uses the document-wide term
+    # frequency. docC:1 has "engine" in all three fields (TF=3) and outscores
+    # docC:2 (TF=1), even though both match @f1:engine with one f1 occurrence.
     def test_field_scoped_query_uses_doc_wide_tf(self):
         client = self.server.get_new_client()
         INDEX_C.load(client)
-        keys, scores = INDEX_C.search(client, "@f1:redis")
+        keys, scores = INDEX_C.search(client, "@f1:engine")
 
         assert keys == ["docC:1", "docC:2"]
         assert scores["docC:1"] > scores["docC:2"]
@@ -590,7 +725,7 @@ class TestTextScoring(ValkeySearchTestCaseBase):
     def test_unscoped_query_uses_doc_wide_tf(self):
         client = self.server.get_new_client()
         INDEX_C.load(client)
-        keys, scores = INDEX_C.search(client, "redis")
+        keys, scores = INDEX_C.search(client, "engine")
 
         assert keys == ["docC:1", "docC:2"]
         assert scores["docC:1"] > scores["docC:2"]
@@ -671,7 +806,7 @@ class TestTextScoring(ValkeySearchTestCaseBase):
 
     # 9.1: BM25's N must count every indexed doc, not only text-bearing ones.
     # idxMix has 4 text docs + 6 numeric/tag-only docs (N=10). The verified
-    # scores match Redis's N=10; scoring with N=4 (text docs only) would produce
+    # scores match the reference implementation's N=10; scoring with N=4 (text docs only) would produce
     # ~0.303/~0.203 and fail here.
     def test_index_size_counts_all_docs_not_just_text(self):
         client = self.server.get_new_client()
@@ -804,7 +939,7 @@ class TestTextScoring(ValkeySearchTestCaseBase):
 
     # 12.2: on a tag-only index (no TEXT field) a tag query matches but scores a
     # well-defined 0 -- avg_doc_len is 0 without a text field, so the BM25 tag
-    # term degenerates to 0 (our implementation returns 0, not Redis's nan).
+    # term degenerates to 0 (our implementation returns 0, not the reference implementation's nan).
     def test_tag_only_index_scores_zero(self):
         client = self.server.get_new_client()
         INDEX_TAG_ONLY.load(client)
@@ -851,7 +986,7 @@ class TestTextScoring(ValkeySearchTestCaseBase):
     # 14.1: a hybrid `text=>[KNN]` query ranks by the text (BM25) score, not by
     # vector distance. hv:short (short body, high BM25) outranks hv:long (long
     # body, low BM25) even though hv:short is FARther in vector space
-    # (__vec_score 32 vs 0). Scores match the Redis 8.6 oracle.
+    # (__vec_score 32 vs 0). Scores match the reference implementation 8.6 oracle.
     def test_hybrid_ranks_by_text_score_not_vector_distance(self):
         client = self.server.get_new_client()
         INDEX_HV.load(client)
@@ -899,3 +1034,71 @@ class TestTextScoring(ValkeySearchTestCaseBase):
         # nearest first: hv:long (distance 0) then hv:short (distance 32).
         assert res[1] == b"hv:long" and res[2] == b"#0"
         assert res[4] == b"hv:short" and res[5] == b"#32"
+
+class TestTfidfScoring(ValkeySearchTestCaseBase):
+    """TFIDF scoring end-to-end, mirroring the BM25STD cases above.
+
+    One test per index so each index is loaded once; the query is included in
+    every assertion message so a failure names the case.
+    """
+
+    @pytest.mark.parametrize(
+        "index,cases", TFIDF_CASES,
+        ids=[index.index for index, _ in TFIDF_CASES])
+    def test_tfidf_scores_match_reference(self, index, cases):
+        client = self.server.get_new_client()
+        index.load(client)
+        for query, extra, expected in cases:
+            keys, scores = index.search(client, query, *extra,
+                                        "SCORER", "TFIDF")
+            assert set(scores) == set(expected), (
+                f"{index.index} {query!r}: matched {sorted(scores)}, "
+                f"expected {sorted(expected)}")
+            for key, (pre_slop, our_slop) in expected.items():
+                got = scores[key]
+                # (1) Reference parity: multiplying our score back up by the slop
+                # divisor we applied must recover the reference implementation's own pre-slop math
+                # (its score times the `/ slop N` it reports in EXPLAINSCORE).
+                # This is the assertion that makes the table a cross-engine
+                # check rather than a snapshot of our own output.
+                assert got * our_slop == pytest.approx(
+                    pre_slop, abs=SCORE_ABS_TOL), (
+                    f"{index.index} {query!r} {key}: pre-slop "
+                    f"{got * our_slop} != reference {pre_slop}")
+                # (2) Final score: the divisor our walk actually applied.
+                assert got == pytest.approx(
+                    pre_slop / our_slop, abs=SCORE_ABS_TOL), (
+                    f"{index.index} {query!r} {key}: expected slop "
+                    f"{our_slop}")
+
+    # BM25STD must be unaffected by slop: idxSlop's two docs have equal length
+    # and equal term sets, so they tie under BM25STD while TFIDF separates them
+    # 4:1 on term proximity alone.
+    def test_bm25std_ignores_term_proximity(self):
+        client = self.server.get_new_client()
+        INDEX_SLOP.load(client)
+        _, bm25 = INDEX_SLOP.search(client, "alpha gamma", "SCORER", "BM25STD")
+        _, tfidf = INDEX_SLOP.search(client, "alpha gamma", "SCORER", "TFIDF")
+
+        assert bm25["dsl:1"] == pytest.approx(bm25["dsl:2"], abs=SCORE_ABS_TOL)
+        assert tfidf["dsl:1"] == pytest.approx(4 * tfidf["dsl:2"],
+                                               abs=SCORE_ABS_TOL)
+
+    # The in-iterator (pure text) and extra-step (text + tag) scoring paths must
+    # derive the SAME slop. Adding a tag conjunct adds a constant 1.0 tag leaf
+    # and moves the query to the other path, so leaves/score must recover the
+    # identical divisor on both.
+    def test_slop_identical_on_both_scoring_paths(self):
+        client = self.server.get_new_client()
+        INDEX_SLOP.load(client)
+        _, text_only = INDEX_SLOP.search(client, "alpha bb cc",
+                                         "SCORER", "TFIDF")
+        _, with_tag = INDEX_SLOP.search(client, "alpha bb cc @cat:{z}",
+                                        "SCORER", "TFIDF")
+
+        for key, leaves in (("dsl:1", 3.0), ("dsl:2", 3.0)):
+            in_iterator = leaves / text_only[key]
+            extra_step = (leaves + 1.0) / with_tag[key]
+            assert in_iterator == pytest.approx(extra_step, abs=1e-4), (
+                f"{key}: in-iterator slop {in_iterator} != "
+                f"extra-step slop {extra_step}")

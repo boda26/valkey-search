@@ -66,6 +66,9 @@ struct DocumentScoreInput {
   float sum_of_terms = 0.0f;
   float document_score = 1.0f;
   uint32_t norm = 0;
+  // Positional spread of the query's terms within this document; 1 means "no
+  // penalty". Never 0 (SlopCalculator::Finalize guarantees >= 1).
+  uint32_t slop = 1;
 };
 
 // Stateless, thread-safe scoring algorithm.
@@ -84,6 +87,11 @@ class Scorer {
 
   // Whether the scorer divides by per-document `norm`; false skips the lookup.
   virtual bool NeedsNorm() const = 0;
+
+  // Whether the scorer divides by per-document `slop`. False skips the per-
+  // document walk over the query's term positions, which is the most expensive
+  // scoring input to produce.
+  virtual bool NeedsSlop() const = 0;
 
   // Query-invariant inverse document frequency. Depends only on the corpus
   // size and the term's document count, so callers precompute it once per term

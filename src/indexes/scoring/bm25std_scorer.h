@@ -37,6 +37,9 @@ class Bm25StdScorer : public Scorer {
   // BM25 has no `norm` divisor.
   bool NeedsNorm() const override { return false; }
 
+  // BM25 has no `slop` divisor.
+  bool NeedsSlop() const override { return false; }
+
   // IDF = ln(1 + (N - dt + 0.5) / (dt + 0.5)).
   float PrecomputeIDF(const IdfInput& input) const override;
 

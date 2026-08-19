@@ -56,6 +56,12 @@ TEST(Bm25StdScorerTest, IdentityNameAndType) {
   EXPECT_EQ(scorer.Type(), ScorerType::kBm25Std);
 }
 
+// A numeric leaf is a pure filter under BM25STD.
+TEST(Bm25StdScorerTest, ScoreNumericLeafIsZero) {
+  Bm25StdScorer scorer;
+  EXPECT_EQ(scorer.ScoreNumericLeaf(), 0.0f);
+}
+
 TEST(Bm25StdScorerTest, ScoreLeafCorpusReference) {
   Bm25StdScorer scorer;
   LeafData leaf = test_data::LeafForHello(test_data::kDocs[4]);
@@ -119,15 +125,38 @@ TEST(Bm25StdScorerDeathTest, DtGreaterThanNIsDebugOnly) {
 
 TEST(Bm25StdScorerTest, ComposeMultipliesByDocumentScore) {
   Bm25StdScorer scorer;
-  EXPECT_NEAR(scorer.ComposeDocumentScore(0.5f, /*document_score=*/0.7f),
+  EXPECT_NEAR(scorer.ComposeDocumentScore({0.5f, /*document_score=*/0.7f}),
               0.5f * 0.7f, kFloatTolerance);
 }
 
 TEST(Bm25StdScorerTest, ComposeInfinityShortCircuits) {
   Bm25StdScorer scorer;
   const float kInf = std::numeric_limits<float>::infinity();
-  EXPECT_EQ(scorer.ComposeDocumentScore(0.5f, kInf), kInf);
-  EXPECT_EQ(scorer.ComposeDocumentScore(0.5f, -kInf), -kInf);
+  EXPECT_EQ(scorer.ComposeDocumentScore({0.5f, kInf}), kInf);
+  EXPECT_EQ(scorer.ComposeDocumentScore({0.5f, -kInf}), -kInf);
+}
+
+// BM25 has no norm divisor, so callers may pass any norm (including 0).
+TEST(Bm25StdScorerTest, ComposeIgnoresNorm) {
+  Bm25StdScorer scorer;
+  EXPECT_FALSE(scorer.NeedsNorm());
+  const float expected = 0.5f * 0.7f;
+  EXPECT_NEAR(scorer.ComposeDocumentScore({0.5f, 0.7f, /*norm=*/0}), expected,
+              kFloatTolerance);
+  EXPECT_NEAR(scorer.ComposeDocumentScore({0.5f, 0.7f, /*norm=*/5}), expected,
+              kFloatTolerance);
+}
+
+// BM25 has no slop divisor, so the proximity of the query's terms is ignored
+// and callers skip the per-document position walk entirely.
+TEST(Bm25StdScorerTest, ComposeIgnoresSlop) {
+  Bm25StdScorer scorer;
+  EXPECT_FALSE(scorer.NeedsSlop());
+  const float expected = 0.5f * 0.7f;
+  EXPECT_NEAR(scorer.ComposeDocumentScore({0.5f, 0.7f, /*norm=*/0, /*slop=*/1}),
+              expected, kFloatTolerance);
+  EXPECT_NEAR(scorer.ComposeDocumentScore({0.5f, 0.7f, /*norm=*/0, /*slop=*/9}),
+              expected, kFloatTolerance);
 }
 
 // Per-document ranking (score-desc / key-asc ordering, document_score

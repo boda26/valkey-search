@@ -1039,10 +1039,9 @@ INSTANTIATE_TEST_SUITE_P(
             .scorer = indexes::scoring::ScorerType::kBm25Std,
         },
         {
-            // TFIDF is not implemented; it must be rejected at parse time
-            // rather than accepted (which would abort at scoring).
-            .test_name = "scorer_tfidf_rejected",
-            .success = false,
+            // TFIDF is a registered scorer and must parse successfully.
+            .test_name = "scorer_tfidf",
+            .success = true,
             .params_str = "",
             .filter_str = "@attribute_identifier_1:[300 1000]",
             .attribute_alias = "",
@@ -1051,6 +1050,7 @@ INSTANTIATE_TEST_SUITE_P(
             .score_as = "",
             .search_parameters_str = "SCORER TFIDF",
             .vector_query = false,
+            .scorer = indexes::scoring::ScorerType::kTfidf,
         },
         // SORTBY tests
         {

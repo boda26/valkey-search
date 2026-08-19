@@ -37,13 +37,13 @@ float Bm25StdScorer::ScoreLeaf(const LeafScoreInput& input) const {
   return input.leaf_weight * input.idf * (numerator / denominator);
 }
 
-float Bm25StdScorer::ComposeDocumentScore(float sum_of_terms,
-                                          float document_score) const {
+float Bm25StdScorer::ComposeDocumentScore(
+    const DocumentScoreInput& input) const {
   // Avoid 0 * inf -> NaN; propagate ±inf as the final score.
-  if (IsInf(document_score)) {
-    return document_score;
+  if (IsInf(input.document_score)) {
+    return input.document_score;
   }
-  return sum_of_terms * document_score;
+  return input.sum_of_terms * input.document_score;
 }
 
 }  // namespace valkey_search::indexes::scoring

@@ -202,7 +202,7 @@ class IndexSchema : public KeyspaceEventSubscription,
     return text_index_schema_->GetKeyDocLen(key);
   }
 
-  uint32_t GetDocumentNorm(const Key &key) const
+  uint32_t GetDocumentNorm(BorrowedInternedStringPtr key) const
       ABSL_SHARED_LOCKS_REQUIRED(time_sliced_mutex_) {
     if (!text_index_schema_) {
       return 0;

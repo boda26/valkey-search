@@ -36,9 +36,9 @@ inline absl::string_view ScorerToString(ScorerType scorer) {
   return "BM25STD";
 }
 
-// new scorers will be added here when implemented
 const absl::NoDestructor<absl::flat_hash_map<absl::string_view, ScorerType>>
-    kScorerByStr({{"BM25STD", ScorerType::kBm25Std}});
+    kScorerByStr({{"BM25STD", ScorerType::kBm25Std},
+                  {"TFIDF", ScorerType::kTfidf}});
 
 // Query-invariant, corpus-level inputs for PrecomputeIDF (once per term).
 struct IdfInput {
@@ -61,6 +61,16 @@ struct LeafScoreInput {
   float leaf_weight = 1.0f;
 };
 
+// Per-document inputs for ComposeDocumentScore; extend as LeafScoreInput does.
+struct DocumentScoreInput {
+  float sum_of_terms = 0.0f;
+  float document_score = 1.0f;
+  uint32_t norm = 0;
+  // Positional spread of the query's terms within this document; 1 means "no
+  // penalty". Never 0 (SlopCalculator::Finalize guarantees >= 1).
+  uint32_t slop = 1;
+};
+
 // Stateless, thread-safe scoring algorithm.
 class Scorer {
  public:
@@ -75,6 +85,14 @@ class Scorer {
   // generic instead of switching on Type().
   virtual bool NeedsDocumentLength() const = 0;
 
+  // Whether the scorer divides by per-document `norm`; false skips the lookup.
+  virtual bool NeedsNorm() const = 0;
+
+  // Whether the scorer divides by per-document `slop`. False skips the per-
+  // document walk over the query's term positions, which is the most expensive
+  // scoring input to produce.
+  virtual bool NeedsSlop() const = 0;
+
   // Query-invariant inverse document frequency. Depends only on the corpus
   // size and the term's document count, so callers precompute it once per term
   // and pass it to ScoreLeaf for every matching document.
@@ -84,8 +102,11 @@ class Scorer {
   // 0 for a degenerate corpus (avg_doc_len <= 0).
   virtual float ScoreLeaf(const LeafScoreInput& input) const = 0;
 
-  virtual float ComposeDocumentScore(float sum_of_terms,
-                                     float document_score) const = 0;
+  // Score of a matched numeric range leaf; a constant, and $weight is ignored.
+  virtual float ScoreNumericLeaf() const = 0;
+
+  // Folds the per-document signals into the final score.
+  virtual float ComposeDocumentScore(const DocumentScoreInput& input) const = 0;
 };
 
 const Scorer* GetScorer(ScorerType type);

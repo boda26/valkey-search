@@ -119,15 +119,26 @@ TEST(Bm25StdScorerDeathTest, DtGreaterThanNIsDebugOnly) {
 
 TEST(Bm25StdScorerTest, ComposeMultipliesByDocumentScore) {
   Bm25StdScorer scorer;
-  EXPECT_NEAR(scorer.ComposeDocumentScore(0.5f, /*document_score=*/0.7f),
+  EXPECT_NEAR(scorer.ComposeDocumentScore({0.5f, /*document_score=*/0.7f}),
               0.5f * 0.7f, kFloatTolerance);
 }
 
 TEST(Bm25StdScorerTest, ComposeInfinityShortCircuits) {
   Bm25StdScorer scorer;
   const float kInf = std::numeric_limits<float>::infinity();
-  EXPECT_EQ(scorer.ComposeDocumentScore(0.5f, kInf), kInf);
-  EXPECT_EQ(scorer.ComposeDocumentScore(0.5f, -kInf), -kInf);
+  EXPECT_EQ(scorer.ComposeDocumentScore({0.5f, kInf}), kInf);
+  EXPECT_EQ(scorer.ComposeDocumentScore({0.5f, -kInf}), -kInf);
+}
+
+// BM25 has no norm divisor, so callers may pass any norm (including 0).
+TEST(Bm25StdScorerTest, ComposeIgnoresNorm) {
+  Bm25StdScorer scorer;
+  EXPECT_FALSE(scorer.NeedsNorm());
+  const float expected = 0.5f * 0.7f;
+  EXPECT_NEAR(scorer.ComposeDocumentScore({0.5f, 0.7f, /*norm=*/0}), expected,
+              kFloatTolerance);
+  EXPECT_NEAR(scorer.ComposeDocumentScore({0.5f, 0.7f, /*norm=*/5}), expected,
+              kFloatTolerance);
 }
 
 // Per-document ranking (score-desc / key-asc ordering, document_score

@@ -34,6 +34,9 @@ class Bm25StdScorer : public Scorer {
   // BM25 normalizes by document length (doc_len / avg_doc_len).
   bool NeedsDocumentLength() const override { return true; }
 
+  // BM25 has no `norm` divisor.
+  bool NeedsNorm() const override { return false; }
+
   // IDF = ln(1 + (N - dt + 0.5) / (dt + 0.5)).
   float PrecomputeIDF(const IdfInput& input) const override;
 
@@ -42,8 +45,7 @@ class Bm25StdScorer : public Scorer {
   // in-iterator hot path (term.cc).
   float ScoreLeaf(const LeafScoreInput& input) const override;
 
-  float ComposeDocumentScore(float sum_of_terms,
-                             float document_score) const override;
+  float ComposeDocumentScore(const DocumentScoreInput& input) const override;
 };
 
 }  // namespace valkey_search::indexes::scoring

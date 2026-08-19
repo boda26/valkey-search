@@ -55,9 +55,9 @@ TEST(TfidfScorerTest, IdentityNameAndType) {
 // equals the IDF.
 TEST(TfidfScorerTest, IdfDifferentiatesByDt) {
   TfidfScorer scorer;
-  EXPECT_NEAR(ScoreLeaf(scorer, test_data::LeafForHello(test_data::kDocs[0]),
-                        1.0f),
-              1.0f, kFloatTolerance);
+  EXPECT_NEAR(
+      ScoreLeaf(scorer, test_data::LeafForHello(test_data::kDocs[0]), 1.0f),
+      1.0f, kFloatTolerance);
   EXPECT_NEAR(
       ScoreLeaf(scorer, test_data::LeafForRare(test_data::kDocs[5]), 1.0f),
       2.0f, kFloatTolerance);
@@ -108,29 +108,49 @@ TEST(TfidfScorerDeathTest, DtGreaterThanNIsDebugOnly) {
 
 TEST(TfidfScorerTest, ComposeMultipliesByDocumentScore) {
   TfidfScorer scorer;
-  EXPECT_NEAR(scorer.ComposeDocumentScore(2.0f, /*document_score=*/0.8f),
-              1.6f, kFloatTolerance);
+  EXPECT_NEAR(
+      scorer.ComposeDocumentScore({2.0f, /*document_score=*/0.8f, /*norm=*/1}),
+      1.6f, kFloatTolerance);
 }
 
 // TFIDF clamps negative document scores (including -inf) to 0.
 TEST(TfidfScorerTest, ComposeNegativeDocumentScoreClampsToZero) {
   TfidfScorer scorer;
   const float kInf = std::numeric_limits<float>::infinity();
-  EXPECT_EQ(scorer.ComposeDocumentScore(2.0f, -10.0f), 0.0f);
-  EXPECT_EQ(scorer.ComposeDocumentScore(2.0f, -kInf), 0.0f);
+  EXPECT_EQ(scorer.ComposeDocumentScore({2.0f, -10.0f, /*norm=*/1}), 0.0f);
+  EXPECT_EQ(scorer.ComposeDocumentScore({2.0f, -kInf, /*norm=*/1}), 0.0f);
 }
 
 TEST(TfidfScorerTest, ComposePositiveInfinityShortCircuits) {
   TfidfScorer scorer;
   const float kInf = std::numeric_limits<float>::infinity();
-  EXPECT_EQ(scorer.ComposeDocumentScore(2.0f, kInf), kInf);
+  EXPECT_EQ(scorer.ComposeDocumentScore({2.0f, kInf, /*norm=*/1}), kInf);
+}
+
+// Redis oracle: a single-term query ties at 1.0 because TF cancels norm.
+TEST(TfidfScorerTest, ComposeDividesByNorm) {
+  TfidfScorer scorer;
+  EXPECT_TRUE(scorer.NeedsNorm());
+  EXPECT_NEAR(scorer.ComposeDocumentScore({2.0f, 1.0f, /*norm=*/2}), 1.0f,
+              kFloatTolerance);
+  EXPECT_NEAR(scorer.ComposeDocumentScore({5.0f, 1.0f, /*norm=*/5}), 1.0f,
+              kFloatTolerance);
+  EXPECT_NEAR(scorer.ComposeDocumentScore({3.0f, 1.0f, /*norm=*/2}), 1.5f,
+              kFloatTolerance);
+}
+
+// A text-less document (tag/numeric/wildcard match) has norm 0 and scores 0.
+TEST(TfidfScorerTest, ComposeZeroNormScoresZero) {
+  TfidfScorer scorer;
+  const float kInf = std::numeric_limits<float>::infinity();
+  EXPECT_EQ(scorer.ComposeDocumentScore({2.0f, 1.0f, /*norm=*/0}), 0.0f);
+  EXPECT_EQ(scorer.ComposeDocumentScore({2.0f, kInf, /*norm=*/0}), 0.0f);
 }
 
 // Per-document ranking (score-desc / key-asc ordering, document_score
-// multiplier, AND/OR accumulation) and per-document `norm` normalization are
-// exercised end-to-end through the scoring integration suite
-// (integration/test_scoring.py), since they depend on the predicate-tree walk
-// and index metadata rather than the scorer in isolation.
+// multiplier, AND/OR accumulation) is exercised end-to-end through the scoring
+// integration suite (integration/test_scoring.py), since it depends on the
+// predicate-tree walk and index metadata rather than the scorer in isolation.
 
 }  // namespace
 }  // namespace valkey_search::indexes::scoring

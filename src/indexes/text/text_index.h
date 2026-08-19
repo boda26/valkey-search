@@ -148,8 +148,8 @@ class TextIndexSchema {
     return itr != per_key_scoring_info_.end() ? itr->second.doc_len : 0;
   }
 
-  uint32_t GetKeyNorm(const InternedStringPtr &key) const {
-    auto itr = per_key_scoring_info_.find(key);
+  uint32_t GetKeyNorm(BorrowedInternedStringPtr key) const {
+    auto itr = per_key_scoring_info_.find(key.AsInternedRef());
     return itr != per_key_scoring_info_.end() ? itr->second.norm : 0;
   }
 

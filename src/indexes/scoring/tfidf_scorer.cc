@@ -32,16 +32,15 @@ float TfidfScorer::ScoreLeaf(const LeafScoreInput& input) const {
   return input.leaf_weight * tf * input.idf;
 }
 
-float TfidfScorer::ComposeDocumentScore(float sum_of_terms,
-                                        float document_score) const {
+float TfidfScorer::ComposeDocumentScore(const DocumentScoreInput& input) const {
   // Negative document scores (including -inf) clamp to 0 under TFIDF.
-  if (document_score < 0.0f) return 0.0f;
+  if (input.document_score < 0.0f) return 0.0f;
+  // A text-less document has norm 0; Redis scores it 0 rather than dividing.
+  if (input.norm == 0) return 0.0f;
   // Avoid 0 * inf -> NaN; propagate +inf as the final score.
-  if (IsInf(document_score)) return document_score;
-  // TODO: divide by the per-document `norm` (max term frequency) and `slop`
-  // once the scoring interface carries a norm channel. Until then the score
-  // omits the `/ norm / slop` normalization (see tfidf_scorer.h).
-  return sum_of_terms * document_score;
+  if (IsInf(input.document_score)) return input.document_score;
+  return input.sum_of_terms * input.document_score /
+         static_cast<float>(input.norm);
 }
 
 }  // namespace valkey_search::indexes::scoring

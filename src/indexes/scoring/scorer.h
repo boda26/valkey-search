@@ -61,6 +61,13 @@ struct LeafScoreInput {
   float leaf_weight = 1.0f;
 };
 
+// Per-document inputs for ComposeDocumentScore; extend as LeafScoreInput does.
+struct DocumentScoreInput {
+  float sum_of_terms = 0.0f;
+  float document_score = 1.0f;
+  uint32_t norm = 0;
+};
+
 // Stateless, thread-safe scoring algorithm.
 class Scorer {
  public:
@@ -75,6 +82,9 @@ class Scorer {
   // generic instead of switching on Type().
   virtual bool NeedsDocumentLength() const = 0;
 
+  // Whether the scorer divides by per-document `norm`; false skips the lookup.
+  virtual bool NeedsNorm() const = 0;
+
   // Query-invariant inverse document frequency. Depends only on the corpus
   // size and the term's document count, so callers precompute it once per term
   // and pass it to ScoreLeaf for every matching document.
@@ -84,8 +94,8 @@ class Scorer {
   // 0 for a degenerate corpus (avg_doc_len <= 0).
   virtual float ScoreLeaf(const LeafScoreInput& input) const = 0;
 
-  virtual float ComposeDocumentScore(float sum_of_terms,
-                                     float document_score) const = 0;
+  // Folds the per-document signals into the final score.
+  virtual float ComposeDocumentScore(const DocumentScoreInput& input) const = 0;
 };
 
 const Scorer* GetScorer(ScorerType type);

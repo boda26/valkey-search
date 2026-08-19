@@ -947,6 +947,7 @@ void ScoreTextQuery(const IndexSchema &index_schema,
   }
 
   const bool needs_doc_len = scorer->NeedsDocumentLength();
+  const bool needs_norm = scorer->NeedsNorm();
   const uint64_t total_doc_len =
       needs_doc_len ? index_schema.GetTotalDocumentLength() : 0;
   const float avg_doc_len =
@@ -987,8 +988,9 @@ void ScoreTextQuery(const IndexSchema &index_schema,
     const float document_score = score_ctx.has_score_field
                                      ? index_schema.GetDocumentScore(key)
                                      : score_ctx.default_document_score;
+    const uint32_t norm = needs_norm ? index_schema.GetDocumentNorm(key) : 0;
     const float final_score =
-        scorer->ComposeDocumentScore(resolved_score, document_score);
+        scorer->ComposeDocumentScore({resolved_score, document_score, norm});
     scored.push_back({candidate.key, 0.0f, final_score});
   }
 
@@ -1032,6 +1034,7 @@ struct SingleDocumentScorer::State {
   uint64_t total_doc_len = 0;
   float avg_doc_len = 0.0f;
   bool needs_doc_len = false;
+  bool needs_norm = false;
   bool has_score_field = false;
   float default_document_score = 1.0f;
 };
@@ -1067,6 +1070,7 @@ SingleDocumentScorer::SingleDocumentScorer(
   if (state_->total_docs == 0) return;
   ResolveLeaves(root_predicate, state_->total_docs, scorer, state_->resolved);
   state_->needs_doc_len = scorer->NeedsDocumentLength();
+  state_->needs_norm = scorer->NeedsNorm();
   state_->total_doc_len =
       state_->needs_doc_len ? index_schema.GetTotalDocumentLength() : 0;
   state_->avg_doc_len = (state_->needs_doc_len && state_->total_docs > 0)
@@ -1110,7 +1114,10 @@ std::optional<float> SingleDocumentScorer::Score(
       score_ctx.has_score_field
           ? state_->index_schema.GetDocumentScore(borrowed_key)
           : score_ctx.default_document_score;
-  return state_->scorer->ComposeDocumentScore(*sum, document_score);
+  const uint32_t norm = state_->needs_norm
+                            ? state_->index_schema.GetDocumentNorm(borrowed_key)
+                            : 0;
+  return state_->scorer->ComposeDocumentScore({*sum, document_score, norm});
 }
 
 absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
@@ -1120,6 +1127,7 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
       index_schema ? index_schema->GetTextIndexSchema() : nullptr;
 
   const auto *scorer = indexes::scoring::GetScorer(parameters.scorer);
+  const bool needs_norm = scorer->NeedsNorm();
 
   // In-iterator scoring captures only the text iterator's score/weight, so it
   // is valid solely for genuinely pure-text queries. Any query that also
@@ -1205,9 +1213,10 @@ absl::StatusOr<std::vector<indexes::BorrowedNeighbor>> DoSearchNonVector(
         if (iterator_scoring_enabled) {
           if (auto *text_iter = iterator->GetTextIterator()) {
             float raw = text_iter->GetScore() * text_iter->GetWeight();
+            const BorrowedInternedStringPtr borrowed_key(key);
             borrowed.back().score = scorer->ComposeDocumentScore(
-                raw,
-                index_schema->GetDocumentScore(BorrowedInternedStringPtr(key)));
+                {raw, index_schema->GetDocumentScore(borrowed_key),
+                 needs_norm ? index_schema->GetDocumentNorm(borrowed_key) : 0});
           }
         }
         iterator->Next();

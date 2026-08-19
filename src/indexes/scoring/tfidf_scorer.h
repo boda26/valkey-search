@@ -20,13 +20,7 @@ namespace valkey_search::indexes::scoring {
 //   tfidf_leaf = leaf_weight * TF * IDF
 //   final      = sum_of_leaves * document_score / norm / slop
 //
-// `norm` (max term frequency in the doc) and `slop` (proximity penalty) are
-// RediSearch-specific divisors. Neither is applied yet: the generic Scorer
-// interface has no channel for a per-document `norm`, and SLOP lands on a
-// separate branch (slop == 1 here). ComposeDocumentScore therefore omits the
-// `/ norm / slop` terms for now; wiring `norm` through the scoring paths is a
-// follow-up. TFIDF-specific behavior that does NOT need norm is preserved:
-// negative document scores (including -inf) clamp to 0.
+// `slop` (proximity penalty) lands on a separate branch and is 1 here.
 class TfidfScorer : public Scorer {
  public:
   static constexpr std::string_view kName = "TFIDF";
@@ -38,14 +32,16 @@ class TfidfScorer : public Scorer {
   // needs neither per-document nor corpus lengths.
   bool NeedsDocumentLength() const override { return false; }
 
+  // Divides the document score by `norm`.
+  bool NeedsNorm() const override { return true; }
+
   // IDF = floor(log2(1 + (N + 1) / dt)).
   float PrecomputeIDF(const IdfInput& input) const override;
 
   // Scores one leaf given a precomputed IDF: leaf_weight * TF * IDF.
   float ScoreLeaf(const LeafScoreInput& input) const override;
 
-  float ComposeDocumentScore(float sum_of_terms,
-                             float document_score) const override;
+  float ComposeDocumentScore(const DocumentScoreInput& input) const override;
 };
 
 }  // namespace valkey_search::indexes::scoring

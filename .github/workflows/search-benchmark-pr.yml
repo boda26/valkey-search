@@ -76,7 +76,7 @@ jobs:
   # does not care how it was started.
   resolve:
     if: |
-      github.repository == 'valkey-io/valkey-search' && (
+      github.repository == 'Frank-Gu-81/valkey-search' && (
         github.event_name == 'workflow_dispatch' ||
         (github.event.action == 'labeled' &&
          (github.event.label.name == 'run-search-benchmark' || github.event.label.name == 'run-search-benchmark-skip-profiling'))
@@ -282,6 +282,20 @@ jobs:
           fi
           ./ci/install_deps.sh
 
+      # The benchmark needs room for two module builds, a valkey build, a
+      # valkey_ram build, the dataset cache and perf output. Fail fast with an
+      # actionable message rather than dying mid-benchmark on ENOSPC.
+      - name: Disk space preflight
+        run: |
+          MIN_FREE_GB=60
+          df -h
+          AVAIL_GB=$(df -BG --output=avail "${{ github.workspace }}" | tail -1 | tr -dc '0-9')
+          echo "Available at workspace: ${AVAIL_GB}G (minimum ${MIN_FREE_GB}G)"
+          if (( AVAIL_GB < MIN_FREE_GB )); then
+            echo "::error::Only ${AVAIL_GB}G free at ${{ github.workspace }}; the benchmark needs at least ${MIN_FREE_GB}G. Prune /home/ec2-user/search-datasets-cache and stale results-* directories, or grow the EBS volume."
+            exit 1
+          fi
+
       - name: Install benchmark Python dependencies
         working-directory: ${{ env.PERF_BENCHMARK_DIR }}
         run: pip install --require-hashes -r requirements.txt
@@ -395,6 +409,14 @@ jobs:
 
       - name: Kill valkey processes between runs
         run: pkill -f valkey || echo "No valkey processes to kill"
+
+      # Raw perf captures dominate disk usage and are not needed for the
+      # comparison. Dropping the PR set here keeps peak usage roughly halved
+      # while the baseline run proceeds.
+      - name: Reclaim disk before baseline run
+        run: |
+          find "$PERF_BENCHMARK_PATH/results-pr" -name '*.perf.data' -type f -delete || true
+          df -h "${{ github.workspace }}"
 
       - name: Run baseline benchmarks
         working-directory: ${{ env.PERF_BENCHMARK_DIR }}

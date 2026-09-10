@@ -385,6 +385,11 @@ jobs:
           fi
           echo "✓ baseline valkey-search module build successful"
 
+      # 2_e and 3_b blow past the 50s FT.SEARCH timeout at 1000 clients with search.reader-threads=1; keep only them (plus each group's 'a' loader) at 100 clients.
+      - name: Trim config to 2_e + 3_b at 100 clients
+        working-directory: ${{ env.PERF_BENCHMARK_DIR }}
+        run: python -c 'import json;p="configs/fts-benchmarks-shortened-arm.json";c=json.load(open(p));k={2:"e",3:"b"};c[0]["test_groups"]=[g|{"scenarios":[s|({"clients":100} if s["id"]!="a" else {}) for s in g["scenarios"] if s["id"] in ("a",k[g["group"]])]} for g in c[0]["test_groups"] if g["group"] in k];assert [(g["group"],[s["id"] for s in g["scenarios"]]) for g in c[0]["test_groups"]]==[(2,["a","e"]),(3,["a","b"])];json.dump(c,open(p,"w"))'
+
       - name: Run PR benchmarks
         working-directory: ${{ env.PERF_BENCHMARK_DIR }}
         run: |

@@ -53,7 +53,8 @@ void InitQMATestIndexSchema(MockIndexSchema *index_schema) {
 
   auto key1 = StringInternStore::Intern("key1");
   std::string test_data = "dogs cats hello world";
-  VMSDK_EXPECT_OK(text_index->AddRecord(key1, test_data));
+  VMSDK_EXPECT_OK(text_index->AddRecord(
+      key1, AttributeData(vmsdk::MakeUniqueValkeyString(test_data))));
   text_index_schema->CommitKeyData(key1);
 }
 
@@ -209,6 +210,15 @@ INSTANTIATE_TEST_SUITE_P(
             .test_name = "weight_non_numeric_nan",
             .filter = "(@title:{dogs}) => { $weight: NaN; }",
             .parse_success = false,
+        },
+        // A value above FLT_MAX would narrow to inf in SetWeight and then
+        // produce a NaN score wherever it met a zero document score.
+        {
+            .test_name = "weight_overflows_float",
+            .filter = "(@title:{dogs}) => { $weight: "
+                      "999999999999999999999999999999999999999999; }",
+            .parse_success = false,
+            .expected_error_substr = "finite",
         },
         {
             .test_name = "weight_missing_value_semicolon",

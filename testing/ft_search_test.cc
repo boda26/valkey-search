@@ -42,7 +42,7 @@
 #include "src/schema_manager.h"
 #include "src/utils/string_interning.h"
 #include "src/valkey_search.h"
-#include "src/vector_externalizer.h"
+#include "src/vector_registry.h"
 #include "testing/common.h"
 #include "testing/coordinator/common.h"
 #include "vmsdk/src/managed_pointers.h"
@@ -178,6 +178,7 @@ void SendReplyTest::DoSendReplyTest(
   EXPECT_CALL(*test_index_schema, GetIdentifier(input.attribute_alias))
       .WillRepeatedly(testing::Return(attribute_id));
   std::vector<indexes::Neighbor> neighbors;
+  neighbors.reserve(input.neighbors.size());
   for (const auto &neighbor : input.neighbors) {
     neighbors.push_back(ToIndexesNeighbor(neighbor));
   }
@@ -539,10 +540,12 @@ class FTSearchTest : public ValkeySearchTestWithParam<
       std::string vector = std::string((char *)vectors[i].data(),
                                        vectors[i].size() * sizeof(float));
       auto interned_key = StringInternStore::Intern(key);
-      std::cerr << "Inserting Key: " << interned_key->Str() << std::endl;
       index_schema.value()->SetDbMutationSequenceNumber(interned_key, i);
       index_schema.value()->SetIndexMutationSequenceNumber(interned_key, i);
-      VMSDK_EXPECT_OK(index.value()->AddRecord(interned_key, vector));
+      auto *vector_base =
+          dynamic_cast<indexes::VectorBase *>(index.value().get());
+      VMSDK_EXPECT_OK(
+          testing_infra::AddVectorRecord(*vector_base, interned_key, vector));
     }
   }
   const std::string index_name = "my_index";
@@ -644,7 +647,7 @@ TEST_P(FTSearchTest, FTSearchTests) {
         return VALKEYMODULE_OK;
       });
   EXPECT_CALL(*kMockValkeyModule,
-              OpenKey(VectorExternalizer::Instance().GetCtx(),
+              OpenKey(VectorRegistry::Instance().GetCtx(),
                       An<ValkeyModuleString *>(), testing::_))
       .WillRepeatedly(TestValkeyModule_OpenKeyDefaultImpl);
   EXPECT_CALL(*kMockValkeyModule,
@@ -739,8 +742,7 @@ TEST_P(FTSearchTest, FTSearchTests) {
         }
       }
       EXPECT_CALL(*kMockValkeyModule, GetBlockedClientPrivateData(&fake_ctx_))
-          .WillRepeatedly(testing::InvokeWithoutArgs(
-              [&] { return private_data_external; }));
+          .WillRepeatedly([&] { return private_data_external; });
       async::Reply(&fake_ctx_, nullptr, 0);
       async::Free(&fake_ctx_, private_data_external);
     }
@@ -833,7 +835,10 @@ class FTSearchMaxLimitTest
                                        vectors[i].size() * sizeof(float));
       auto interned_key = StringInternStore::Intern(key);
 
-      VMSDK_EXPECT_OK(index.value()->AddRecord(interned_key, vector));
+      auto *vector_base =
+          dynamic_cast<indexes::VectorBase *>(index.value().get());
+      VMSDK_EXPECT_OK(
+          testing_infra::AddVectorRecord(*vector_base, interned_key, vector));
     }
   }
 

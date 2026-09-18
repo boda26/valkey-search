@@ -47,22 +47,9 @@ Postings::~Postings() {
 // Check if posting list contains any documents
 bool Postings::IsEmpty() const { return key_to_positions_.empty(); }
 
-// Count terms across all fields in a position map
-unsigned int count_num_terms(const PositionMap& pos_map) {
-  unsigned int num_terms = 0;
-  for (const auto& [_, field_mask] : pos_map) {
-    num_terms += field_mask.CountSetFields();
-  }
-  return num_terms;
-}
-
-void Postings::InsertKey(const Key& key, FlatPositionMap* flat_map,
+void Postings::InsertKey(const Key& key, FlatPositionMap* flat_map, uint32_t tf,
                          uint32_t doc_len) {
-  // Insert FlatPositionMap pointer plus mirrors of its (immutable) tf and the
-  // key's document length.
-  PostingValue value{
-      flat_map, static_cast<uint32_t>(flat_map->GetTermFrequency()), doc_len};
-  key_to_positions_.emplace(key, value);
+  key_to_positions_.emplace(key, PostingValue{flat_map, tf, doc_len});
 }
 
 // Remove a document key and all its positions
@@ -72,12 +59,8 @@ void Postings::RemoveKey(const Key& key, TextIndexMetadata* metadata) {
 
   FlatPositionMap* flat_map = node.mapped().map;
 
-  // Use member functions to get counts
-  size_t position_count = flat_map->CountPositions();
-  size_t term_frequency = flat_map->GetTermFrequency();
-
-  metadata->total_positions -= position_count;
-  metadata->total_term_frequency -= term_frequency;
+  metadata->total_positions -= flat_map->CountPositions();
+  metadata->total_term_frequency -= node.mapped().tf;
 
   // Destroy and remove from map
   FlatPositionMap::Destroy(flat_map);
@@ -104,10 +87,36 @@ size_t Postings::GetTotalTermFrequency() const {
   return total_frequency;
 }
 
-std::optional<PostingValue> Postings::LookupKey(
-    BorrowedInternedStringPtr key) const {
-  auto it = key_to_positions_.find(key.AsInternedRef());
+namespace {
+
+// Does any position for this key fall in a field in `field_mask`?
+bool PositionsContainFields(const FlatPositionMap& flat_map,
+                            uint64_t field_mask) {
+  PositionIterator iter(flat_map);
+  while (iter.IsValid()) {
+    if ((iter.GetFieldMask() & field_mask) != 0) {
+      return true;
+    }
+    iter.NextPosition();
+  }
+  return false;
+}
+
+}  // namespace
+
+std::optional<PostingValue> Postings::LookupKey(BorrowedInternedStringPtr key,
+                                                uint64_t field_mask) const {
+  auto it = key_to_positions_.find(key);
   if (it == key_to_positions_.end()) {
+    return std::nullopt;
+  }
+  // Every key present has >=1 position, so "any field" needs no scan.
+  if (field_mask == ~0ULL) {
+    return it->second;
+  }
+  CHECK(it->second.map != nullptr)
+      << "Posting list contains a key with no FlatPositionMap";
+  if (!PositionsContainFields(*it->second.map, field_mask)) {
     return std::nullopt;
   }
   return it->second;
@@ -151,20 +160,7 @@ bool Postings::KeyIterator::ContainsFields(uint64_t field_mask) const {
   // and every key in the posting list has at least one position entry.
   if (field_mask == ~0ULL) return true;
 
-  FlatPositionMap* flat_map = current_->second.map;
-
-  // Check all positions for this key to see if any of the requested fields are
-  // set
-  PositionIterator iter(*flat_map);
-  while (iter.IsValid()) {
-    uint64_t position_mask = iter.GetFieldMask();
-    if ((position_mask & field_mask) != 0) {
-      return true;
-    }
-    iter.NextPosition();
-  }
-
-  return false;
+  return PositionsContainFields(*current_->second.map, field_mask);
 }
 
 bool Postings::KeyIterator::SkipForwardKey(const Key& key) {

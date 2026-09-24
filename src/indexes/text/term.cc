@@ -20,11 +20,7 @@ TermIterator::TermIterator(
         key_iterators,
     const FieldMaskPredicate query_field_mask, const bool require_positions,
     const FieldMaskPredicate stem_field_mask, bool has_original,
-    float leaf_weight, uint32_t num_doc_contain_term,
-    uint32_t stem_num_doc_contain_term, uint32_t root_num_doc_contain_term,
-    bool has_root, const TextIndexSchema* text_index_schema,
-    const scoring::Scorer* scorer,
-    absl::InlinedVector<uint32_t, kWordExpansionInlineCapacity> per_term_dt)
+    const TermScoringParams& scoring)
     : query_field_mask_(query_field_mask),
       stem_field_mask_(stem_field_mask),
       key_iterators_(std::move(key_iterators)),
@@ -32,25 +28,25 @@ TermIterator::TermIterator(
       current_field_mask_(0ULL),
       require_positions_(require_positions),
       has_original_(has_original),
-      has_root_(has_root),
-      leaf_weight_(leaf_weight),
-      num_doc_contain_term_(num_doc_contain_term),
-      text_index_schema_(text_index_schema) {
+      has_root_(scoring.has_root),
+      leaf_weight_(scoring.leaf_weight),
+      num_doc_contain_term_(scoring.num_doc_contain_term),
+      text_index_schema_(scoring.text_index_schema) {
   // Derive the query-invariant corpus stats from the schema and precompute the
   // per-term IDF once, so GetScore() avoids a per-document log call. A null
   // schema/scorer or empty corpus disables scoring (constant-stub fallback).
-  if (text_index_schema_ != nullptr && scorer != nullptr) {
+  if (text_index_schema_ != nullptr && scoring.scorer != nullptr) {
     const auto stats = text_index_schema_->GetIndexScoringStats();
     if (stats.total_docs > 0) {
-      scorer_ = scorer;
+      scorer_ = scoring.scorer;
       avg_doc_len_ = stats.avg_doc_len;
       // total_docs and the doc counts come from separate, independently-locked
       // counters and can be transiently out of sync, so clamp to keep
       // dt <= total_docs (matches ResolveLeaves in search.cc).
-      if (!per_term_dt.empty()) {
+      if (!scoring.per_term_dt.empty()) {
         // Expansion mode (prefix/suffix/fuzzy): one IDF per matched term.
-        per_term_idf_.reserve(per_term_dt.size());
-        for (uint32_t dt : per_term_dt) {
+        per_term_idf_.reserve(scoring.per_term_dt.size());
+        for (uint32_t dt : scoring.per_term_dt) {
           per_term_idf_.push_back(scorer_->PrecomputeIDF(
               {stats.total_docs, std::min(dt, stats.total_docs)}));
         }
@@ -62,10 +58,10 @@ TermIterator::TermIterator(
              std::min(num_doc_contain_term_, stats.total_docs)});
         idf_stem_ = scorer_->PrecomputeIDF(
             {stats.total_docs,
-             std::min(stem_num_doc_contain_term, stats.total_docs)});
+             std::min(scoring.stem_num_doc_contain_term, stats.total_docs)});
         idf_root_ = scorer_->PrecomputeIDF(
             {stats.total_docs,
-             std::min(root_num_doc_contain_term, stats.total_docs)});
+             std::min(scoring.root_num_doc_contain_term, stats.total_docs)});
       }
     }
   }

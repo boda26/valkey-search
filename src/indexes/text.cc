@@ -236,9 +236,15 @@ std::unique_ptr<indexes::text::TextIterator> TermPredicate::BuildTextIterator(
   // first pass)
   return std::make_unique<indexes::text::TermIterator>(
       std::move(key_iterators), field_mask, require_positions, stem_field_mask,
-      found_original, GetWeight() * or_weight_multiplier, num_doc_contain_term,
-      stem_num_doc_contain_term, root_num_doc_contain_term, has_root,
-      GetTextIndexSchema().get(), GetScorer());
+      found_original,
+      indexes::text::TermScoringParams{
+          .leaf_weight = GetWeight() * or_weight_multiplier,
+          .num_doc_contain_term = num_doc_contain_term,
+          .stem_num_doc_contain_term = stem_num_doc_contain_term,
+          .root_num_doc_contain_term = root_num_doc_contain_term,
+          .has_root = has_root,
+          .text_index_schema = GetTextIndexSchema().get(),
+          .scorer = GetScorer()});
 }
 
 std::unique_ptr<indexes::text::TextIterator> PrefixPredicate::BuildTextIterator(
@@ -266,10 +272,11 @@ std::unique_ptr<indexes::text::TextIterator> PrefixPredicate::BuildTextIterator(
   return std::make_unique<indexes::text::TermIterator>(
       std::move(key_iterators), field_mask, require_positions,
       /*stem_field_mask=*/0, /*has_original=*/false,
-      GetWeight() * or_weight_multiplier,
-      /*num_doc_contain_term=*/0, /*stem_num_doc_contain_term=*/0,
-      /*root_num_doc_contain_term=*/0, /*has_root=*/false,
-      GetTextIndexSchema().get(), GetScorer(), std::move(per_term_dt));
+      indexes::text::TermScoringParams{
+          .leaf_weight = GetWeight() * or_weight_multiplier,
+          .text_index_schema = GetTextIndexSchema().get(),
+          .scorer = GetScorer(),
+          .per_term_dt = std::move(per_term_dt)});
 }
 
 std::unique_ptr<indexes::text::TextIterator> SuffixPredicate::BuildTextIterator(
@@ -299,10 +306,11 @@ std::unique_ptr<indexes::text::TextIterator> SuffixPredicate::BuildTextIterator(
   return std::make_unique<indexes::text::TermIterator>(
       std::move(key_iterators), field_mask, require_positions,
       /*stem_field_mask=*/0, /*has_original=*/false,
-      GetWeight() * or_weight_multiplier,
-      /*num_doc_contain_term=*/0, /*stem_num_doc_contain_term=*/0,
-      /*root_num_doc_contain_term=*/0, /*has_root=*/false,
-      GetTextIndexSchema().get(), GetScorer(), std::move(per_term_dt));
+      indexes::text::TermScoringParams{
+          .leaf_weight = GetWeight() * or_weight_multiplier,
+          .text_index_schema = GetTextIndexSchema().get(),
+          .scorer = GetScorer(),
+          .per_term_dt = std::move(per_term_dt)});
 }
 
 std::unique_ptr<indexes::text::TextIterator> InfixPredicate::BuildTextIterator(
@@ -323,11 +331,11 @@ std::unique_ptr<indexes::text::TextIterator> FuzzyPredicate::BuildTextIterator(
   return std::make_unique<indexes::text::TermIterator>(
       std::move(expansion.key_iterators), field_mask, require_positions,
       /*stem_field_mask=*/0, /*has_original=*/false,
-      GetWeight() * or_weight_multiplier,
-      /*num_doc_contain_term=*/0, /*stem_num_doc_contain_term=*/0,
-      /*root_num_doc_contain_term=*/0, /*has_root=*/false,
-      GetTextIndexSchema().get(), GetScorer(),
-      std::move(expansion.per_term_dt));
+      indexes::text::TermScoringParams{
+          .leaf_weight = GetWeight() * or_weight_multiplier,
+          .text_index_schema = GetTextIndexSchema().get(),
+          .scorer = GetScorer(),
+          .per_term_dt = std::move(expansion.per_term_dt)});
 }
 
 /*

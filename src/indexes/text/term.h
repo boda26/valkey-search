@@ -42,6 +42,23 @@ true. Thus, position iteration is a union of all position iterators obtained
 from all the posting iterators that are on the current key and field mask.
 
 */
+
+// Inputs used only for scoring. The default (null schema/scorer) disables
+// scoring, and GetScore() falls back to the constant stub.
+struct TermScoringParams {
+  float leaf_weight = 1.0f;
+  uint32_t num_doc_contain_term = 0;
+  // Stem scoring inputs; mutually exclusive with per_term_dt below, since an
+  // expansion never stems.
+  uint32_t stem_num_doc_contain_term = 0;
+  uint32_t root_num_doc_contain_term = 0;
+  bool has_root = false;
+  const TextIndexSchema* text_index_schema = nullptr;
+  const scoring::Scorer* scorer = nullptr;
+  // Expansion (prefix/suffix/fuzzy) scoring input: one dt per matched term.
+  absl::InlinedVector<uint32_t, kWordExpansionInlineCapacity> per_term_dt;
+};
+
 class TermIterator : public TextIterator {
  public:
   TermIterator(
@@ -49,16 +66,7 @@ class TermIterator : public TextIterator {
           key_iterators,
       const FieldMaskPredicate query_field_mask, const bool require_positions,
       const FieldMaskPredicate stem_field_mask = 0, bool has_original = false,
-      float leaf_weight = 1.0f, uint32_t num_doc_contain_term = 0,
-      // Stem scoring inputs; mutually exclusive with per_term_dt below, since
-      // an expansion never stems.
-      uint32_t stem_num_doc_contain_term = 0,
-      uint32_t root_num_doc_contain_term = 0, bool has_root = false,
-      const TextIndexSchema* text_index_schema = nullptr,
-      const scoring::Scorer* scorer = nullptr,
-      // Expansion (prefix/suffix/fuzzy) scoring input: one dt per matched term.
-      absl::InlinedVector<uint32_t, kWordExpansionInlineCapacity> per_term_dt =
-          {});
+      const TermScoringParams& scoring = {});
   /* Implementation of TextIterator APIs */
   FieldMaskPredicate QueryFieldMask() const override;
   // Key-level iteration

@@ -363,15 +363,14 @@ void TextIndexSchema::DeleteKeyData(const InternedStringPtr &key) {
     {
       absl::MutexLock word_lock(&rax_target_mutex_pool_.Get(word_str));
 
-      InvasivePtr<Postings> existing;
-      {
-        absl::ReaderMutexLock tree_read(&text_index_mutex_);
-        existing = text_index_->GetPrefix().FindPostingsTarget(word_str);
-      }
+      // The per-key tree holds the same Postings object as the schema-level
+      // tree (installed by CommitKeyData), so no schema-tree lookup is needed.
+      InvasivePtr<Postings> existing = iter.GetPostingsTarget();
+      CHECK(existing);
 
       // Only stem-enabled fields were counted, and the field mask is only
       // readable before the key leaves the postings below.
-      if ((stem_text_field_mask_ != 0u) && existing) {
+      if ((stem_text_field_mask_ != 0u)) {
         auto key_iter = existing->GetKeyIterator();
         if (key_iter.SkipForwardKey(key) &&
             key_iter.ContainsFields(stem_text_field_mask_)) {

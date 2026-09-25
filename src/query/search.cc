@@ -1189,16 +1189,16 @@ void ScoreTextQuery(const IndexSchema &index_schema,
 }
 
 // Applies text relevance scoring to KNN neighbors when the vector query also
-// carries a text predicate (a hybrid `text=>[KNN]` query). Reuses
+// carries a text or tag predicate (e.g. a hybrid `text=>[KNN]` query). Reuses
 // ScoreTextQuery via a thin BorrowedNeighbor adapter: KNN preserves neighbor
 // order, so the scores map back by index. Neighbor.distance is left untouched
 // (still reported via the score_as field); only Neighbor.score is set to the
 // text relevance, mirroring Redis WITHSCORES. Pure vector queries and vector
-// queries filtered only by numeric/tag predicates keep the KNN distance as
+// queries filtered only by numeric predicates keep the KNN distance as
 // their score.
 void ApplyHybridTextScore(const SearchParameters &parameters,
                           std::vector<indexes::Neighbor> &neighbors) {
-  if (parameters.vector_score_only || !QueryHasTextPredicate(parameters) ||
+  if (parameters.vector_score_only || !QueryHasScoredPredicate(parameters) ||
       neighbors.empty()) {
     return;
   }
@@ -1586,7 +1586,7 @@ void SearchResult::TrimResults(std::vector<T> &vec,
       std::sort(vec.begin(), vec.end(), cmp);
     }
   } else if (parameters.IsNonVectorQuery() ||
-             (QueryHasTextPredicate(parameters) &&
+             (QueryHasScoredPredicate(parameters) &&
               !parameters.vector_score_only)) {
     // Two cases sort by score descending here:
     //   - Cluster-merge non-vector path: the merged Neighbor vector is drained
@@ -1757,9 +1757,10 @@ absl::Status SearchAsync(std::unique_ptr<SearchParameters> parameters,
   return absl::OkStatus();
 }
 
-bool QueryHasTextPredicate(const SearchParameters &parameters) {
+bool QueryHasScoredPredicate(const SearchParameters &parameters) {
+  // Tag leaves are relevance-scored too, so tag=>[KNN] must rank by them.
   return parameters.filter_parse_results.query_operations &
-         QueryOperations::kContainsText;
+         (QueryOperations::kContainsText | QueryOperations::kContainsTag);
 }
 
 // Increment query operation metrics based on query operations flags.
@@ -2070,7 +2071,7 @@ ContentProcessing SearchParameters::GetContentProcessing() const {
     return kNoContent;
   }
   // Currently, ContentAvailable isn't detected. Future use case.
-  if (query::QueryHasTextPredicate(*this)) {
+  if (filter_parse_results.query_operations & QueryOperations::kContainsText) {
     return kContentionCheckRequired;
   }
   return kContentRequired;

@@ -54,7 +54,7 @@ void ReplyScoreTopLevel(ValkeyModuleCtx *ctx, float score);
 
 bool HasTextRelevance(const SearchCommand &parameters) {
   return parameters.IsNonVectorQuery() ||
-         query::QueryHasTextPredicate(parameters);
+         query::QueryHasScoredPredicate(parameters);
 }
 
 void SendReplyNoContent(ValkeyModuleCtx *ctx,

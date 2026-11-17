@@ -611,6 +611,28 @@ class TestScoring(ValkeySearchTestCaseBase):
         assert scores == pytest.approx({f"doc:{i}": 0.0 for i in range(1, 11)},
                                        abs=SCORE_ABS_TOL)
 
+    # An AND under an OR that fails only on a tag, numeric or negation clause
+    # adds nothing to a doc the other branch admits (#1728).
+    def test_or_skips_and_failing_on_filter(self):
+        client = self.server.get_new_client()
+        index = [
+            "FT.CREATE", "idxOrFilter", "ON", "HASH", "PREFIX", "1", "k:",
+            "SCHEMA", "t", "TEXT", "NOSTEM", "c", "TAG", "n", "NUMERIC",
+        ]
+        load(client, index, {
+            "k:1": {"t": "apple banana", "c": "red", "n": 50},
+            "k:2": {"t": "apple", "c": "blue", "n": 5},
+        })
+        keys, apple = search(client, index, "apple")
+        assert keys == ["k:2", "k:1"]
+        for query in ["(banana @c:{blue}) | apple",
+                      "apple | (banana @c:{blue})",
+                      "(banana @n:[0 10]) | apple",
+                      "(banana -apple) | apple"]:
+            got_keys, got = search(client, index, query)
+            assert got_keys == keys, query
+            assert got == pytest.approx(apple, abs=SCORE_ABS_TOL), query
+
     # Group 11: tag values score as BM25 terms with per-value IDF.
     # With a TEXT field in the schema: tags score exactly like text, except TF=1.
     # Without one: avg_doc_len is 0, so every leaf degenerates to a score of 0.

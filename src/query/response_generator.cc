@@ -250,7 +250,8 @@ FilterVerification VerifyFilter(const query::SearchParameters &parameters,
     // nullopt (empty corpus / non-match) degrades to 0 rather than dropping the
     // already-admitted document.
     verification.recomputed_score =
-        RecomputeDocumentScore(predicate, n.external_id, *query_ctx, records)
+        RecomputeDocumentScore(predicate, n.external_id, *query_ctx, records,
+                               evaluator)
             .value_or(0.0f);
   }
   return verification;

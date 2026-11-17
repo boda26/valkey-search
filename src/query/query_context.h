@@ -108,6 +108,7 @@ class QueryContext {
                            BorrowedInternedStringPtr key) const;
 
   bool ShortLocks() const { return mode_ == LockMode::kShortLocks; }
+  const IndexSchema &Schema() const { return index_schema_; }
 
   const indexes::scoring::Scorer *Scorer() const { return scorer_; }
   const CorpusStats &Stats() const { return stats_; }
